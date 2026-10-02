@@ -1,0 +1,32 @@
+# Terraform working directories and state
+**/.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.tfstate.lock.info
+
+# Saved plans and crash logs
+*.tfplan
+crash.log
+crash.*.log
+
+# Local Terraform inputs; commit only sanitized examples
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+!*.tfvars.json.example
+
+# Environment files and credentials
+.env
+.env.*
+!.env.example
+.aws/
+*.pem
+*.key
+.vault_pass*
+vault-password*
+
+# Local editor and OS files
+.vscode/
+.DS_Store
+.codex
+Thumbs.db
