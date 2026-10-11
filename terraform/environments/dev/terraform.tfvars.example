@@ -1,0 +1,12 @@
+name_prefix = "lago-dev"
+vpc_cidr    = "10.42.0.0/16"
+
+subnets = {
+  public_a = {
+    cidr_block        = "10.42.1.0/24"
+    availability_zone = "us-east-2a"
+    type              = "public"
+  }
+}
+
+tags = {}
