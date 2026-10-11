@@ -1,5 +1,6 @@
 # Terraform working directories and state
 **/.terraform/
+terraform/modules/**/.terraform.lock.hcl
 *.tfstate
 *.tfstate.*
 .terraform.tfstate.lock.info
@@ -30,3 +31,7 @@ vault-password*
 .DS_Store
 .codex
 Thumbs.db
+
+# Private state backups and local review artifacts
+.local/
+*.tfplan.json
