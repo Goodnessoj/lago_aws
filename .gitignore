@@ -35,4 +35,6 @@ Thumbs.db
 # Private state backups and local review artifacts
 .local/
 *.tfplan.json
-docs/checkpoints.md
+
+# Local project documentation
+/docs/

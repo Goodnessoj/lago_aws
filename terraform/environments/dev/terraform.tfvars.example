@@ -10,3 +10,24 @@ subnets = {
 }
 
 tags = {}
+
+host_subnet_key  = "public_a"
+ami_id           = "ami-09519cc56eb20524a"
+instance_type    = "t3a.large"
+root_volume_gib  = 16
+data_volume_gib  = 30
+web_ingress_cidrs = ["0.0.0.0/0"]
+enable_http      = true
+
+parameter_paths = [
+  "/lago/dev/postgres_password",
+  "/lago/dev/secret_key_base",
+  "/lago/dev/rsa_private_key",
+  "/lago/dev/encryption_primary_key",
+  "/lago/dev/encryption_deterministic_key",
+  "/lago/dev/encryption_key_derivation_salt",
+  "/lago/dev/initial_admin_password",
+]
+parameter_kms_key_arns = []
+log_retention_days    = 7
+alarm_actions         = []
