@@ -23,6 +23,11 @@ output "public_ip" {
   value       = module.ec2.public_ip
 }
 
+output "application_hostnames" {
+  description = "Frontend and API DNS names; resolution does not imply application or HTTPS readiness."
+  value       = { for key, record in aws_route53_record.application : key => record.name }
+}
+
 output "security_group_id" {
   description = "Host application security group."
   value       = module.ec2.security_group_id

@@ -6,7 +6,9 @@ mock_provider "aws" {
   mock_data "aws_subnet" { defaults = { vpc_id = "vpc-0123456789abcdef0", availability_zone = "us-east-2a", map_public_ip_on_launch = false } }
   mock_data "aws_ami" { defaults = { id = "ami-09519cc56eb20524a", architecture = "x86_64" } }
   mock_data "aws_ec2_instance_type" { defaults = { supported_architectures = ["x86_64"] } }
+  mock_data "aws_route53_zone" { defaults = { zone_id = "Z0123456789EXAMPLE", name = "phoniex.site.", private_zone = false } }
   mock_resource "aws_vpc" { defaults = { id = "vpc-0123456789abcdef0" } }
+  mock_resource "aws_eip" { defaults = { public_ip = "203.0.113.10" } }
 }
 
 # Keep mock applies from writing or deleting the controller's real inventory.
@@ -81,5 +83,24 @@ run "complete_dev_contract" {
       jsondecode(output.controller_transfer_policy_json).Statement[1].Condition.StringLike["s3:prefix"] == ["${output.instance_id}/*"]
     )
     error_message = "The controller's transfer permissions must be scoped to this host's object prefix."
+  }
+}
+
+run "application_dns_contract" {
+  command = plan
+  assert {
+    condition = (
+      length(aws_route53_record.application) == 2 &&
+      output.application_hostnames == { frontend = "app.phoniex.site", api = "api.phoniex.site" } &&
+      data.aws_route53_zone.application.name == "phoniex.site." &&
+      !data.aws_route53_zone.application.private_zone &&
+      alltrue([for record in aws_route53_record.application :
+        record.zone_id == "Z0123456789EXAMPLE" &&
+        record.type == "A" && record.ttl == 300 &&
+        record.records == toset([output.public_ip]) &&
+        !record.allow_overwrite
+      ])
+    )
+    error_message = "Only the two approved IPv4 hostnames may be created in the existing public zone, targeting the managed EIP without overwriting existing records."
   }
 }
