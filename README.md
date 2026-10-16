@@ -1,170 +1,184 @@
 # Lago on AWS
 
-An evolving deployment of Lago, moving from a validated local
-Docker Compose environment to AWS.
+Infrastructure and deployment automation for self-hosting Lago on AWS using
+Terraform, Ansible, and Docker Compose. The lab uses one EC2 instance for the
+application and its supporting services, with administration through AWS
+Systems Manager rather than SSH.
 
-## Current Milestone
-M2: AWS foundation, host configuration, and application deployment.
+## Current Status
 
-- M2A: Provision infrastructure with Terraform.
-- M2B: Configure the host with Ansible over SSM.
-- M2C: Deploy and validate Lago over HTTPS.
+The AWS infrastructure is provisioned, the host is configured, and application
+secrets and DNS records are in place. Lago deployment automation is implemented
+and locally tested, but **Lago and HTTPS have not yet been deployed on EC2**.
 
-## Initial Architecture
-Region: us-east-2 (Ohio).
+Deployment is paused. EC2 was last confirmed stopped on **2026-10-16**; the
+retained EBS volumes and Elastic IP continue to incur charges.
 
-One VPC, one public subnet, and one EC2 instance running Lago,
-PostgreSQL, and Redis through Docker Compose.
+| Component | Current state |
+| --- | --- |
+| Terraform infrastructure | Deployed; last post-apply plan reported no changes |
+| Ansible host configuration | Applied and verified, including reboot and repeatability checks |
+| CloudWatch | Host metrics, system/bootstrap logs, and container logging verified |
+| Application secrets | Seven SecureString parameters created; repeat creation made no changes |
+| DNS | Frontend and API A records created and resolution verified |
+| Lago deployment | Playbooks and templates prepared; not run on EC2 |
+| HTTPS and application checks | Certificate issuance, login, API, and invoice/PDF checks pending |
+| Backups and alerting | Not implemented |
 
-Administration uses SSM, with no inbound SSH. Caddy provides HTTPS.
-This initial deployment is not highly available.
+## AWS Infrastructure
 
-Architecture notes, runbooks, and evidence are maintained locally in the
-ignored `docs/` directory.
+Terraform manages the development environment in **us-east-2 (Ohio)**.
 
-## Verified Status
+| Resource | Configuration |
+| --- | --- |
+| Network | One VPC (`10.42.0.0/16`) and public subnet (`10.42.1.0/24`) in `us-east-2a` |
+| Internet access | Internet gateway, explicit public route, and Elastic IP |
+| Compute | One `t3a.large`: 2 vCPUs, 8 GiB RAM, Ubuntu 24.04 amd64 |
+| Root storage | 16 GiB encrypted gp3 EBS |
+| Application storage | Separate 20 GiB encrypted gp3 EBS volume mounted at `/srv/lago-data` |
+| Inbound access | TCP 80/443 for the web proxy; no inbound SSH |
+| Administration | SSM Session Manager, with IMDSv2 required |
+| Permissions | EC2 instance role for SSM, named application parameters, logs, and host metrics |
+| Terraform state | Private, encrypted, versioned S3 bucket with TLS enforcement and native S3 locking |
+| Ansible transfers | Separate private, encrypted S3 bucket with one-day object expiration |
+| Monitoring | CloudWatch log groups with seven-day retention and memory/disk metrics |
 
-The state bucket and all five foundation modules are deployed in Ohio. Backend
-TLS enforcement, encrypted storage, routing, security groups, and SSM access
-are verified. Terraform generates the Ansible inventory automatically, and the
-live access playbook passed with five successful tasks and zero changes.
-Both Terraform roots report no changes after deployment.
+The application data volume is managed separately from EC2 and protected by
+`prevent_destroy`. The instance also has termination protection. Retaining a
+disk is not a backup; application backup and restore are still pending.
 
-Host configuration is deployed: safe UUID-based data mounting, security,
-Docker/Compose, and CloudWatch. Reboot recovery and retained storage passed;
-both final configuration passes made zero changes. Host metrics, system and
-bootstrap logs, and a container logging smoke test are verified.
+The environment uses five reusable Terraform modules:
 
-EC2 stopped automatically after verification on 2026-10-15; the stopped state
-was confirmed on 2026-10-16. EBS and EIP charges continue. Lago, HTTPS,
-backup/restore, and alerting remain later work.
+- [Networking](terraform/modules/networking/README.md): VPC, subnets, routing, and default security-group restrictions.
+- [IAM](terraform/modules/iam/README.md): host role, instance profile, and runtime permissions.
+- [EC2](terraform/modules/ec2/README.md): host, security group, Elastic IP, and encrypted storage.
+- [Deployment support](terraform/modules/deployment_support/README.md): S3 transfers for Ansible over SSM.
+- [Observability](terraform/modules/observability/README.md): log groups and CloudWatch agent configuration.
 
-The current stage keeps the AWS foundation, host configuration, Docker, and
-basic logs/host metrics. Alarm resources and their configuration have been
-removed from code and AWS after the approved cleanup on 2026-10-16. The apply
-deleted only the five alarms; no host reconfiguration was needed.
+The development environment also manages two Route 53 A records in the existing
+`phoniex.site` public hosted zone. Both point to the Terraform-managed Elastic
+IP with a 300-second TTL:
 
-Application deployment automation is implemented and locally tested, but not
-run on EC2. It prepares pinned Lago services, protected host-side secret
-retrieval, and Caddy for `app.phoniex.site` and `api.phoniex.site`. Both DNS A
-records are managed by Terraform and resolve publicly to the host Elastic IP
-with TTL 300; the existing hosted zone and other records were preserved.
-All seven SecureString parameters were created in
-Ohio on 2026-10-16; metadata checks passed and a repeat run made zero changes.
-Live host retrieval, deployment, HTTPS, login and PDF compatibility are not yet
-verified.
+| Purpose | Hostname |
+| --- | --- |
+| Frontend | `app.phoniex.site` |
+| API | `api.phoniex.site` |
 
-DNS is defined directly in `terraform/environments/dev/dns.tf`. The environment
-looks up the existing public `phoniex.site` zone and creates only the two
-approved records, using the managed EIP output rather than a copied address.
-No new hosted zone, DNS module, or certificate resource is needed at this stage.
-DNS resolution does not mean the stopped host is serving Lago or HTTPS.
+DNS resolution is configured, but these are **not yet live application
+endpoints**.
 
-The public repository is [Goodnessoj/lago_aws](https://github.com/Goodnessoj/lago_aws).
+## Host Configuration
 
-## Prerequisites and Validation
+Ansible connects over SSM using a YAML inventory generated by Terraform during
+`apply`. The inventory contains the current instance ID, transfer bucket,
+volume settings, and logging configuration. No manual copying of Terraform
+outputs is needed, and generating inventory does not automatically run Ansible.
 
-Verified controller tools: Terraform 1.15.1 and AWS CLI 2.34.30. Root provider
-lock files pin AWS provider 6.67.0; configuration requires Terraform >= 1.10
-and < 2.0 for native S3 locking. The project-local Ansible/Session Manager
-controller is installed and pinned; live host access over SSM is verified.
+Four roles configure the host:
 
-Use an authorized non-root AWS identity in `us-east-2`. The dev backend expects
-the existing bootstrap bucket; do not run bootstrap apply blindly in a new
-account or delete its local state. Local Terraform state and plans stay outside
-Git. Restricted local bootstrap-state backups are stored under
-`.local/bootstrap-state-backups/`; a protected off-device backup is still required.
+| Role | Responsibility |
+| --- | --- |
+| `base` | Install dependencies, validate the application disk, and mount ext4 storage by UUID |
+| `security` | Enable unattended security updates, disable SSH, and bound system log storage |
+| `docker` | Install pinned Docker Engine, containerd, and Compose; place their storage on the data volume |
+| `cloudwatch` | Install the verified agent package and configure host metrics and log delivery |
+
+Disk checks reject unexpected volumes, partitions, filesystem signatures, and
+conflicting mounts. Formatting a blank disk requires explicit authorization;
+an existing ext4 filesystem is preserved. Docker and containerd services depend
+on the application mount so they cannot silently write to the root disk when
+it is missing.
+
+Live verification has covered SSM access, storage mounting, service recovery
+after reboot, retained data, and container log delivery. Both final host
+configuration passes reported zero changes. These checks do not yet establish
+application availability or application recovery.
+
+## Application Deployment
+
+The `lago` Ansible role prepares the following Docker Compose stack on the
+configured host. **This stack has not yet been started on EC2.**
+
+| Service | Purpose |
+| --- | --- |
+| Lago frontend | Browser interface |
+| Lago API | Application backend |
+| Lago worker and clock | Background jobs and scheduled work |
+| PostgreSQL with pg_partman | Application database |
+| Redis | Background-job queue and cache |
+| Gotenberg | PDF generation |
+| Caddy | Reverse proxy and automatic HTTPS |
+| One-off migration container | Database migrations and initial organization/admin setup |
+
+Images are pinned by immutable amd64 digest. The current Lago API and frontend
+baseline is `v1.53.0`; a release and security review is required before public
+deployment. Only Caddy publishes host ports. Database, Redis, and PDF services
+remain internal to the Compose network, and public signup is disabled.
+
+Persistent database, Redis, application-upload, and Caddy volumes use the
+EBS-backed Docker storage. Deployment validates DNS and host storage before
+starting services, and records successful initialization so interrupted updates
+can retry migrations.
+
+Seven application secrets already exist as Parameter Store SecureStrings under
+`/lago/dev/`: the database password, Rails secret, RSA private key, three
+encryption settings, and initial administrator password. Secret creation does
+not overwrite existing values. During deployment, the host will retrieve these
+through its instance role and render a root-owned environment file with mode
+`0600`. Live retrieval and application use have not yet been verified.
+
+## Repository Layout
+
+```text
+terraform/
+  bootstrap/              S3 state-backend infrastructure
+  environments/dev/       Module wiring, DNS, inventory generation, and tests
+  modules/                Five reusable infrastructure modules
+ansible/
+  inventories/dev/        Sanitized examples; actual inventory/settings ignored
+  playbooks/              Host setup, secrets, deployment, and verification
+  roles/                  Host configuration and Lago deployment
+  tests/                  Local storage and template checks
+ansible.cfg               Controller, inventory, and role settings
+```
+
+Local runbooks and evidence live in the ignored `docs/` directory. Credentials,
+private inventory/settings, Terraform state, saved plans, and installed local
+dependencies are also excluded from Git.
+
+## Validation and Operation
+
+The verified controller uses Terraform 1.15.1, AWS CLI 2.34.30, and the pinned
+Ansible dependencies listed in `ansible/requirements.txt` and
+`ansible/requirements.yml`. SSM connections also require the Session Manager
+plugin. See the [Ansible README](ansible/README.md) for controller installation,
+playbook commands, disk initialization safeguards, and deployment procedures.
+
+Terraform checks, after provider initialization:
 
 ```bash
 terraform fmt -check -recursive terraform
-terraform -chdir=terraform/environments/dev init -input=false -lockfile=readonly
 terraform -chdir=terraform/environments/dev validate -no-color
 terraform -chdir=terraform/environments/dev test -no-color
 terraform -chdir=terraform/modules/networking test -no-color
-terraform -chdir=terraform/environments/dev plan -input=false -out=foundation.tfplan
-terraform -chdir=terraform/environments/dev show -no-color foundation.tfplan
 ```
 
-Module tests use a mock AWS provider and never provision infrastructure.
-Module READMEs describe contracts, limits, and focused test commands.
-Review and approve the saved plan before applying; regenerate it after
-configuration/state changes. After an approved apply, verify VPC DNS, subnet
-public-IP settings, explicit internet routing, security-group rules, remote
-state presence, and a fresh no-change plan. Verify SSM registration, IAM scope,
-storage encryption, and EIP attachment before host configuration.
-
-## Ansible Controller
+The Terraform test suites use mock AWS providers and do not provision resources.
+Local Ansible checks run from the repository root:
 
 ```bash
 source .local/ansible-venv/bin/activate
-ansible --version
+ansible-playbook ansible/tests/storage.yml
+ansible-playbook ansible/tests/templates.yml
+ansible-playbook ansible/tests/application.yml
+ansible-playbook ansible/playbooks/configure.yml --syntax-check
+ansible-playbook ansible/playbooks/deploy.yml --syntax-check \
+  -e @ansible/inventories/dev/application.yml
 ```
 
-The controller uses standard Ansible commands and a Terraform-generated YAML
-inventory. Dependencies are installed under ignored `.local/` directories.
-After the reviewed AWS apply, inspect the generated inventory and verify access:
-
-```bash
-terraform -chdir=terraform/environments/dev output ansible_inventory_file
-ansible-inventory --graph
-ansible-playbook ansible/playbooks/verify-access.yml
-```
-
-Terraform's `local_file` resource writes the inventory with current host,
-transfer-bucket, and volume values, mode 0600, and Git exclusion. It contains no
-credentials or application secrets. See [setup and access checks](ansible/README.md).
-It also carries the existing Terraform-defined agent and Docker logging settings.
-The host roles are composed by `ansible/playbooks/configure.yml`. Native
-verification playbooks check storage/services, exercise a deliberate reboot,
-and run configuration twice before stopping the lab instance. Application
-deployment remains the next checkpoint.
-
-## Deployed Lab Settings
-
-Dev uses a pinned Canonical Ubuntu 24.04 amd64 AMI with a `t3a.large`
-(2 vCPUs, 8 GiB), 16 GiB encrypted gp3 root storage, and a separately managed
-20 GiB encrypted gp3 data volume. The host uses SSM only, IMDSv2, standard CPU
-credits, and Caddy-only ingress on ports 80/443. Ansible mounts application data
-before Docker/containerd startup and gates their services on the intended disk.
-
-The 20 GiB data allocation follows a measured local storage review. CPU/memory
-capacity still needs workload validation; this allocation is not a production
-capacity guarantee. The data volume is formatted as ext4 and mounted by UUID at
-`/srv/lago-data`; Docker and containerd have separate storage roots there.
-
-The data volume has `prevent_destroy`; root storage is deleted with the host.
-EC2 termination protection must be deliberately disabled before reviewed host
-removal. Stopping compute retains EBS/EIP charges. Backup/restore is a separate
-checkpoint, not a property of persistent storage.
-
-The USD 30/month target requires bounded runtime. On 2026-10-11 the Ohio Pricing
-API returned USD 0.0752/hour for the host and USD 0.08/GiB-month for gp3.
-An allocated public IPv4 costs USD 0.005/hour even while compute is stopped
-([AWS pricing](https://aws.amazon.com/vpc/pricing/)). Continuous compute alone
-is about USD 54.90 for 730 hours. Review the full service estimate and current
-account spending before approving an apply; no free-tier allowance is assumed.
-
-Secret values remain outside Terraform. Host tasks will retrieve the seven named
-SecureString parameters and render a protected environment file. The separate
-Ansible transfer bucket has short expiration, suspended versioning, encryption,
-and blocked public access. The controller policy output is review-only and is
-not attached to an operator automatically.
-
-CloudWatch configuration retains bounded log retention and basic host metrics.
-Host/bootstrap logs are delivered, and the Docker smoke test verified container
-logging. Alarms, threshold tuning, and notification delivery are deferred until
-after application deployment and baseline measurement.
-
-## Repository Structure
-- terraform/bootstrap/: Terraform backend infrastructure.
-- terraform/environments/dev/: Initial AWS environment.
-- terraform/modules/: Networking, IAM, EC2, observability, and deployment support.
-- ansible/: Host configuration and application deployment.
-- docs/: Local documentation, runbooks, and evidence; excluded from Git.
-
-## Working Principles
-- Justify each infrastructure component.
-- Never commit credentials, secrets, Terraform state, or saved plans.
-- Review changes and estimated costs before provisioning.
-- Test recovery and document observed behavior.
-- Plan teardown and explicitly identify data that must be retained.
+The template checks require the generated inventory; the deployment syntax
+check also uses the local application settings. Local checks do not establish
+live application health. Live playbooks require a running, SSM-accessible host
+and authorized AWS credentials. Review Terraform plans before applying them;
+the current backend references this lab's existing state bucket and must be
+adapted for a separate deployment.
