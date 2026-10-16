@@ -30,4 +30,3 @@ parameter_paths = [
 ]
 parameter_kms_key_arns = []
 log_retention_days    = 7
-alarm_actions         = []

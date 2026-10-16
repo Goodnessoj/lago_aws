@@ -61,11 +61,6 @@ output "log_group_names" {
   value       = module.observability.log_group_names
 }
 
-output "alarm_names" {
-  description = "Host alarms; notification delivery remains unconfigured unless actions are supplied."
-  value       = module.observability.alarm_names
-}
-
 output "cloudwatch_agent_config_json" {
   description = "Non-secret configuration to install through Ansible, not Terraform user data."
   value       = module.observability.agent_config_json

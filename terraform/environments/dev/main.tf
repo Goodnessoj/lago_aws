@@ -85,12 +85,9 @@ module "ec2" {
 module "observability" {
   source = "../../modules/observability"
 
-  name_prefix      = var.name_prefix
-  instance_id      = module.ec2.instance_id
   log_groups       = local.log_groups
   retention_days   = var.log_retention_days
   metric_namespace = local.metric_namespace
   data_mount_path  = local.data_mount_path
-  alarm_actions    = var.alarm_actions
   tags             = local.tags
 }

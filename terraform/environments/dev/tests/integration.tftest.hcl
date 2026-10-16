@@ -34,7 +34,7 @@ run "complete_dev_contract" {
   assert {
     condition = (
       contains(keys(output.public_subnet_ids), "public_a") &&
-      length(output.volume_ids) == 2 && length(output.log_group_names) == 3 && length(output.alarm_names) == 5 &&
+      length(output.volume_ids) == 2 && length(output.log_group_names) == 3 &&
       output.ansible_connection.ansible_aws_ssm_bucket_name != "lago-tfstate-us-east-2-f31e719a5b888b03e3bdf256df"
     )
     error_message = "The environment must compose every required module and keep transfer storage separate from state."

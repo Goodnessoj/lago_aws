@@ -5,9 +5,7 @@ mock_provider "aws" {
 }
 
 variables {
-  name_prefix = "lago-test"
-  instance_id = "i-0123456789abcdef0"
-  log_groups  = { system = "/lago/dev/system", application = "/lago/dev/application", bootstrap = "/lago/dev/bootstrap" }
+  log_groups = { system = "/lago/dev/system", application = "/lago/dev/application", bootstrap = "/lago/dev/bootstrap" }
 }
 
 run "bounded_logs_and_matching_metrics" {
@@ -19,17 +17,22 @@ run "bounded_logs_and_matching_metrics" {
   }
   assert {
     condition = (
-      length(aws_cloudwatch_metric_alarm.host) == 5 &&
-      aws_cloudwatch_metric_alarm.host["memory"].namespace == jsondecode(output.agent_config_json).metrics.namespace &&
-      aws_cloudwatch_metric_alarm.host["disk"].dimensions["InstanceId"] == "i-0123456789abcdef0" &&
-      length(aws_cloudwatch_metric_alarm.host["disk"].dimensions) == 1 &&
-      jsondecode(output.agent_config_json).metrics.aggregation_dimensions == [["InstanceId"]]
+      jsondecode(output.agent_config_json).metrics.namespace == "Lago/Host" &&
+      jsondecode(output.agent_config_json).metrics.append_dimensions.InstanceId == "$${aws:InstanceId}" &&
+      jsondecode(output.agent_config_json).metrics.aggregation_dimensions == [["InstanceId"]] &&
+      jsondecode(output.agent_config_json).metrics.metrics_collected.mem.measurement == ["mem_used_percent"] &&
+      jsondecode(output.agent_config_json).metrics.metrics_collected.disk.resources == ["/", "/srv/lago-data"] &&
+      jsondecode(output.agent_config_json).metrics.metrics_collected.disk.drop_original_metrics == ["disk_used_percent"]
     )
-    error_message = "Agent metrics and alarm dimensions/namespaces must match."
+    error_message = "Keep basic memory/disk metrics scoped to the host without duplicate disk series."
   }
   assert {
-    condition     = !output.notification_actions_configured && alltrue([for alarm in aws_cloudwatch_metric_alarm.host : !alarm.actions_enabled && alarm.treat_missing_data == "missing"])
-    error_message = "Unconfigured delivery and missing agent data must not be presented as working alerts."
+    condition = (
+      jsondecode(output.agent_config_json).logs.logs_collected.files.collect_list[0].log_group_name == output.log_group_names["system"] &&
+      jsondecode(output.agent_config_json).logs.logs_collected.files.collect_list[1].log_group_name == output.log_group_names["bootstrap"] &&
+      output.docker_logging.options["awslogs-group"] == output.log_group_names["application"]
+    )
+    error_message = "Host and container logs must use the pre-created log groups."
   }
 }
 
@@ -40,12 +43,9 @@ run "reject_unbounded_retention" {
   expect_failures = [var.retention_days]
 }
 
-run "explicit_notification_destination" {
+run "reject_reserved_metric_namespace" {
   command = plan
   module { source = "../../modules/observability" }
-  variables { alarm_actions = ["arn:aws:sns:us-east-2:123456789012:lago-alerts"] }
-  assert {
-    condition     = output.notification_actions_configured && alltrue([for alarm in aws_cloudwatch_metric_alarm.host : alarm.actions_enabled && alarm.alarm_actions == toset(["arn:aws:sns:us-east-2:123456789012:lago-alerts"])])
-    error_message = "Every alarm must target the explicit notification destination when supplied."
-  }
+  variables { metric_namespace = "AWS/EC2" }
+  expect_failures = [var.metric_namespace]
 }

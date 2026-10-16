@@ -110,9 +110,3 @@ variable "log_retention_days" {
   type        = number
   default     = 7
 }
-
-variable "alarm_actions" {
-  description = "Existing SNS topics, if supplied; no notifications are configured by default."
-  type        = list(string)
-  default     = []
-}

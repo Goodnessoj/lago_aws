@@ -12,19 +12,9 @@ output "log_group_names" {
   value       = { for key, group in aws_cloudwatch_log_group.this : key => group.name }
 }
 
-output "alarm_names" {
-  description = "Alarms keyed by CPU, status, CPU credits, memory, and disk."
-  value       = { for key, alarm in aws_cloudwatch_metric_alarm.host : key => alarm.alarm_name }
-}
-
 output "agent_config_json" {
-  description = "Non-secret agent configuration for later Ansible installation, matching alarm dimensions and paths."
+  description = "Non-secret host metrics and log collection settings consumed by Ansible."
   value       = jsonencode(local.agent_config)
-}
-
-output "notification_actions_configured" {
-  description = "Whether actions were supplied; delivery must still be tested."
-  value       = length(var.alarm_actions) > 0
 }
 
 output "docker_logging" {
