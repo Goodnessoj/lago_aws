@@ -9,8 +9,44 @@ mock_provider "aws" {
   mock_resource "aws_vpc" { defaults = { id = "vpc-0123456789abcdef0" } }
 }
 
+# Keep mock applies from writing or deleting the controller's real inventory.
+mock_provider "local" {}
+
 run "complete_dev_contract" {
   command = apply
+  assert {
+    condition = (
+      local_file.ansible_inventory.file_permission == "0600" &&
+      local_file.ansible_inventory.directory_permission == "0700" &&
+      output.ansible_inventory_file == abspath("${path.root}/../../../ansible/inventories/dev/hosts.yml") &&
+      keys(yamldecode(local_file.ansible_inventory.content).all.children.lago.hosts) == [output.instance_id] &&
+      yamldecode(local_file.ansible_inventory.content).all.children.lago.hosts[output.instance_id].ansible_aws_ssm_instance_id == output.instance_id &&
+      yamldecode(local_file.ansible_inventory.content).all.children.lago.hosts[output.instance_id].lago_data_volume_id == output.volume_ids.data
+    )
+    error_message = "Terraform must generate private inventory using the current host and data-volume outputs."
+  }
+  assert {
+    condition = (
+      yamldecode(local_file.ansible_inventory.content).all.children.lago.vars.ansible_connection == "amazon.aws.aws_ssm" &&
+      yamldecode(local_file.ansible_inventory.content).all.children.lago.vars.ansible_aws_ssm_region == "us-east-2" &&
+      yamldecode(local_file.ansible_inventory.content).all.children.lago.vars.ansible_aws_ssm_bucket_name == output.ansible_connection.ansible_aws_ssm_bucket_name &&
+      yamldecode(local_file.ansible_inventory.content).all.children.lago.vars.ansible_aws_ssm_bucket_sse_mode == "AES256" &&
+      yamldecode(local_file.ansible_inventory.content).all.children.lago.vars.ansible_become == true &&
+      yamldecode(local_file.ansible_inventory.content).all.children.lago.vars.lago_data_mount_path == "/srv/lago-data"
+    )
+    error_message = "Generated YAML must preserve the SSM, encrypted transfer-storage, and mount contracts."
+  }
+  assert {
+    condition = (
+      yamldecode(local_file.ansible_inventory.content).all.children.lago.vars.lago_cloudwatch_agent_config == jsondecode(output.cloudwatch_agent_config_json) &&
+      yamldecode(local_file.ansible_inventory.content).all.children.lago.vars.lago_docker_logging == merge(output.docker_logging, {
+        options = merge(output.docker_logging.options, {
+          tag = "{% raw %}${output.docker_logging.options.tag}{% endraw %}"
+        })
+      })
+    )
+    error_message = "Host configuration must consume the same monitoring and logging settings as Terraform outputs."
+  }
   assert {
     condition = (
       output.ansible_connection.ansible_connection == "amazon.aws.aws_ssm" &&

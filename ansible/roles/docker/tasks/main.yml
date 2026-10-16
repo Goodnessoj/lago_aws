@@ -1,0 +1,140 @@
+---
+- name: Inspect legacy runtime data directories
+  ansible.builtin.stat:
+    path: '{{ item }}'
+  loop: [/var/lib/docker, /var/lib/containerd]
+  register: lago_legacy_roots
+
+- name: Look for data requiring deliberate migration
+  ansible.builtin.find:
+    paths: '{{ item.item }}'
+    file_type: any
+    hidden: true
+    recurse: false
+  loop: '{{ lago_legacy_roots.results }}'
+  loop_control:
+    label: '{{ item.item }}'
+  when: item.stat.isdir | default(false)
+  register: lago_legacy_data
+
+- name: Refuse to silently abandon existing runtime data
+  ansible.builtin.assert:
+    that:
+      - item.matched | default(0) == 0
+    fail_msg: Existing root-disk Docker/containerd data requires a reviewed migration.
+    quiet: true
+  loop: '{{ lago_legacy_data.results }}'
+  loop_control:
+    label: '{{ item.item.item }}'
+
+- name: Create Docker repository and configuration directories
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - /etc/apt/keyrings
+    - /etc/docker
+    - /etc/containerd
+    - /etc/systemd/system/docker.service.d
+    - /etc/systemd/system/docker.socket.d
+    - /etc/systemd/system/containerd.service.d
+
+- name: Install the official Docker repository signing key
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Configure the official Docker stable repository
+  ansible.builtin.deb822_repository:
+    name: docker
+    types: [deb]
+    uris: https://download.docker.com/linux/ubuntu
+    suites: [noble]
+    components: [stable]
+    architectures: [amd64]
+    signed_by: /etc/apt/keyrings/docker.asc
+  register: lago_docker_repository
+
+- name: Install pinned Docker Engine, containerd and Compose without starting services
+  ansible.builtin.apt:
+    name:
+      - 'docker-ce={{ lago_docker_engine_version }}'
+      - 'docker-ce-cli={{ lago_docker_engine_version }}'
+      - 'containerd.io={{ lago_containerd_version }}'
+      - 'docker-compose-plugin={{ lago_compose_version }}'
+    state: present
+    update_cache: '{{ lago_docker_repository.changed }}'
+    install_recommends: false
+    policy_rc_d: 101
+    lock_timeout: 180
+  notify: Restart container runtime
+
+- name: Create runtime storage on the mounted data disk
+  ansible.builtin.file:
+    path: '{{ lago_data_mount_path }}/{{ item }}'
+    state: directory
+    owner: root
+    group: root
+    # containerd enforces 0700 on startup; match it to avoid repeat-run drift.
+    mode: "{{ '0700' if item == 'containerd' else '0710' }}"
+  loop: [docker, containerd]
+
+- name: Configure Docker storage and bounded CloudWatch logging
+  ansible.builtin.template:
+    src: daemon.json.j2
+    dest: /etc/docker/daemon.json
+    owner: root
+    group: root
+    mode: '0644'
+    validate: /usr/bin/dockerd --validate --config-file %s
+  notify: Restart container runtime
+
+- name: Configure containerd storage separately from Docker
+  ansible.builtin.template:
+    src: containerd.toml.j2
+    dest: /etc/containerd/config.toml
+    owner: root
+    group: root
+    mode: '0644'
+    validate: /usr/bin/containerd --config %s config dump
+  notify: Restart container runtime
+
+- name: Gate runtime services and socket on the mounted data disk
+  ansible.builtin.template:
+    src: data-mount.conf.j2
+    dest: '/etc/systemd/system/{{ item }}.d/10-lago-data.conf'
+    owner: root
+    group: root
+    mode: '0644'
+  loop: [containerd.service, docker.socket, docker.service]
+  notify: Restart container runtime
+
+- name: Apply configuration changes before runtime verification
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable the container runtime
+  ansible.builtin.systemd_service:
+    name: '{{ item }}'
+    daemon_reload: true
+    enabled: true
+    state: started
+  loop: [containerd.service, docker.socket, docker.service]
+
+- name: Inspect Docker storage location
+  ansible.builtin.command:
+    argv: [docker, info, --format, json]
+  register: lago_docker_info
+  changed_when: false
+  check_mode: false
+
+- name: Confirm Docker is using the application volume
+  ansible.builtin.assert:
+    that:
+      - (lago_docker_info.stdout | from_json).DockerRootDir == lago_data_mount_path + '/docker'
+    quiet: true

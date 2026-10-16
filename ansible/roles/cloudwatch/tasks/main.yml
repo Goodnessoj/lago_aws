@@ -1,0 +1,47 @@
+---
+- name: Download the versioned and checksum-verified CloudWatch agent
+  ansible.builtin.get_url:
+    url: '{{ lago_cloudwatch_agent_url }}'
+    dest: /var/cache/amazon-cloudwatch-agent.deb
+    checksum: 'sha256:{{ lago_cloudwatch_agent_sha256 }}'
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Install the pinned CloudWatch agent
+  ansible.builtin.apt:
+    deb: /var/cache/amazon-cloudwatch-agent.deb
+    state: present
+    policy_rc_d: 101
+    lock_timeout: 180
+
+- name: Verify the installed CloudWatch package version
+  ansible.builtin.command:
+    argv: [dpkg-query, --show, '--showformat=${Version}', amazon-cloudwatch-agent]
+  register: lago_cloudwatch_package
+  changed_when: false
+  check_mode: false
+
+- name: Require the reviewed agent version
+  ansible.builtin.assert:
+    that:
+      - lago_cloudwatch_package.stdout == lago_cloudwatch_agent_version
+    quiet: true
+
+- name: Render the Terraform-defined CloudWatch configuration
+  ansible.builtin.copy:
+    content: "{{ lago_cloudwatch_agent_config | to_nice_json }}\n"
+    dest: /opt/aws/amazon-cloudwatch-agent/etc/cloudwatch-agent.json
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Apply CloudWatch configuration
+
+- name: Apply the agent configuration before verifying service state
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable CloudWatch monitoring
+  ansible.builtin.systemd_service:
+    name: amazon-cloudwatch-agent
+    enabled: true
+    state: started

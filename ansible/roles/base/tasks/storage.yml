@@ -1,0 +1,112 @@
+---
+- name: Locate the Nitro EBS disk by volume identity
+  ansible.builtin.stat:
+    path: "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_{{ lago_data_volume_id | replace('-', '') }}"
+    follow: true
+  register: lago_data_device
+
+- name: Require the expected EBS block device
+  ansible.builtin.assert:
+    that:
+      - lago_data_device.stat.exists
+      - lago_data_device.stat.isblk | default(false)
+    fail_msg: The intended data volume is missing; do not substitute a device name.
+    quiet: true
+
+- name: Inspect disk identity, filesystems and partitions
+  ansible.builtin.command:
+    argv:
+      - lsblk
+      - --json
+      - --paths
+      - --output
+      - NAME,TYPE,FSTYPE,MOUNTPOINTS,SERIAL,UUID
+      - "{{ lago_data_device.stat.path }}"
+  register: lago_disk_probe
+  changed_when: false
+  check_mode: false
+
+- name: Inspect all recognized disk signatures without modifying them
+  ansible.builtin.command:
+    argv: [wipefs, --no-act, --json, --output, 'TYPE,UUID', '{{ lago_data_device.stat.path }}']
+  register: lago_signature_probe
+  changed_when: false
+  check_mode: false
+
+- name: Inspect existing mounts
+  ansible.builtin.command:
+    argv: [findmnt, --json, --list, --output, 'TARGET,SOURCE,UUID']
+  register: lago_mount_probe
+  changed_when: false
+  check_mode: false
+
+- name: Decode the storage probes
+  ansible.builtin.set_fact:
+    lago_disk: "{{ (lago_disk_probe.stdout | from_json).blockdevices[0] }}"
+    lago_disk_signatures: "{{ (lago_signature_probe.stdout | from_json).signatures }}"
+    lago_current_mounts: "{{ (lago_mount_probe.stdout | from_json).filesystems | selectattr('target', 'equalto', lago_data_mount_path) | list }}"
+
+- name: Validate the disk before any formatting or mounting
+  ansible.builtin.import_tasks: validate-storage.yml
+
+- name: Inspect the existing mount directory
+  ansible.builtin.stat:
+    path: '{{ lago_data_mount_path }}'
+  register: lago_mount_directory
+
+- name: Inspect an unmounted directory for fallback data
+  ansible.builtin.find:
+    paths: '{{ lago_data_mount_path }}'
+    file_type: any
+    hidden: true
+    recurse: false
+  register: lago_fallback_data
+  when:
+    - lago_mount_directory.stat.exists
+    - lago_current_mounts | length == 0
+
+- name: Refuse to hide existing fallback data
+  ansible.builtin.assert:
+    that:
+      - not lago_mount_directory.stat.exists or lago_mount_directory.stat.isdir | default(false)
+      - lago_current_mounts | length > 0 or lago_fallback_data.matched | default(0) == 0
+    fail_msg: The unmounted data path contains files; review and migrate them first.
+    quiet: true
+
+- name: Initialize only an explicitly approved blank data disk
+  community.general.filesystem:
+    dev: '{{ lago_data_device.stat.path }}'
+    fstype: ext4
+    force: false
+  when: lago_disk.fstype != 'ext4'
+
+- name: Read the stable filesystem UUID
+  ansible.builtin.command:
+    argv: [blkid, -s, UUID, -o, value, '{{ lago_data_device.stat.path }}']
+  register: lago_data_uuid
+  changed_when: false
+  check_mode: false
+
+- name: Mount application storage persistently by UUID
+  ansible.posix.mount:
+    path: '{{ lago_data_mount_path }}'
+    src: 'UUID={{ lago_data_uuid.stdout }}'
+    fstype: ext4
+    opts: defaults,nosuid,nodev
+    dump: '0'
+    passno: '2'
+    state: mounted
+
+- name: Protect the mounted data directory
+  ansible.builtin.file:
+    path: '{{ lago_data_mount_path }}'
+    owner: root
+    group: root
+    mode: '0750'
+
+- name: Determine the systemd mount unit name
+  ansible.builtin.command:
+    argv: [systemd-escape, --path, --suffix=mount, '{{ lago_data_mount_path }}']
+  register: lago_data_mount_unit
+  changed_when: false
+  check_mode: false

@@ -1,0 +1,27 @@
+---
+- name: Set up a synthetic storage case
+  ansible.builtin.set_fact:
+    lago_disk: '{{ disk_fixture | combine(storage_case.disk | default({})) }}'
+    lago_disk_signatures: "{{ storage_case.signatures | default([{'type': 'ext4'}]) }}"
+    lago_current_mounts: '{{ storage_case.mounts | default([]) }}'
+    lago_initialize_data_volume: '{{ storage_case.initialize | default(false) }}'
+    storage_accepted: false
+
+- name: Evaluate the production storage guard
+  block:
+    - name: Run the same assertions used before formatting
+      ansible.builtin.include_tasks: ../roles/base/tasks/validate-storage.yml
+    - name: Record an accepted disk
+      ansible.builtin.set_fact:
+        storage_accepted: true
+  rescue:
+    - name: Record a rejected disk
+      ansible.builtin.set_fact:
+        storage_accepted: false
+
+- name: Check the expected storage decision
+  ansible.builtin.assert:
+    that:
+      - storage_accepted == storage_case.accepted
+    fail_msg: 'Unexpected storage decision: {{ storage_case.name }}'
+    quiet: true

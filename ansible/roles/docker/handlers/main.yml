@@ -1,0 +1,14 @@
+---
+- name: Restart containerd
+  ansible.builtin.systemd_service:
+    name: containerd
+    daemon_reload: true
+    state: restarted
+  listen: Restart container runtime
+
+- name: Restart Docker
+  ansible.builtin.systemd_service:
+    name: docker
+    daemon_reload: true
+    state: restarted
+  listen: Restart container runtime

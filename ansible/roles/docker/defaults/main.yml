@@ -1,0 +1,4 @@
+---
+lago_docker_engine_version: '5:29.9.1-1~ubuntu.24.04~noble'
+lago_containerd_version: '2.4.2-2~ubuntu.24.04~noble'
+lago_compose_version: '5.6.0-1~ubuntu.24.04~noble'

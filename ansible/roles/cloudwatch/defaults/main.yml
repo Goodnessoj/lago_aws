@@ -1,0 +1,4 @@
+---
+lago_cloudwatch_agent_version: '1.300073.2b1889-1'
+lago_cloudwatch_agent_url: https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/amd64/1.300073.2b1889/amazon-cloudwatch-agent.deb
+lago_cloudwatch_agent_sha256: f25c81f42627ac481b51215e8e6f989208ab266f8b224ffd66a208061e790f1c

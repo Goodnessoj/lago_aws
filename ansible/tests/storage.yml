@@ -1,0 +1,60 @@
+---
+- name: Test storage safety checks without accessing a disk
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  vars:
+    lago_data_mount_path: /srv/lago-data
+    lago_data_volume_id: vol-0123456789abcdef0
+    disk_fixture:
+      type: disk
+      serial: vol0123456789abcdef0
+      fstype: ext4
+      uuid: fixture-uuid
+      mountpoints: [null]
+    storage_cases:
+      - name: Existing ext4 disk is retained
+        accepted: true
+      - name: Correctly mounted ext4 disk is retained
+        disk: {mountpoints: [/srv/lago-data]}
+        mounts: [{uuid: fixture-uuid}]
+        accepted: true
+      - name: Blank disk requires explicit approval
+        disk: {fstype: null, uuid: null}
+        signatures: []
+        accepted: false
+      - name: Approved blank disk may be initialized
+        disk: {fstype: null, uuid: null}
+        signatures: []
+        initialize: true
+        accepted: true
+      - name: Another volume is rejected
+        disk: {serial: volfffffffffffffffff}
+        accepted: false
+      - name: Partitions are rejected
+        disk: {children: [{type: part}]}
+        accepted: false
+      - name: Other filesystems are rejected even with initialization approved
+        disk: {fstype: xfs}
+        signatures: [{type: xfs}]
+        initialize: true
+        accepted: false
+      - name: A partition-table signature is rejected on a supposedly blank disk
+        disk: {fstype: null, uuid: null}
+        signatures: [{type: gpt}]
+        initialize: true
+        accepted: false
+      - name: Another filesystem at the target mount is rejected
+        mounts: [{uuid: other-uuid}]
+        accepted: false
+      - name: A disk mounted elsewhere is rejected
+        disk: {mountpoints: [/unexpected]}
+        accepted: false
+  tasks:
+    - name: Exercise each storage policy case
+      ansible.builtin.include_tasks: storage-case.yml
+      loop: '{{ storage_cases }}'
+      loop_control:
+        loop_var: storage_case
+        label: '{{ storage_case.name }}'

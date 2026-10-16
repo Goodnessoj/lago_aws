@@ -1,0 +1,20 @@
+---
+- name: Refuse unsafe data disks or mount locations
+  ansible.builtin.assert:
+    that:
+      - lago_data_mount_path == '/srv/lago-data'
+      - lago_disk.type == 'disk'
+      - lago_disk.serial | replace('-', '') == lago_data_volume_id | replace('-', '')
+      - lago_disk.get('children', []) | length == 0
+      - lago_disk.fstype | default('', true) in ['', 'ext4']
+      - lago_disk_signatures | map(attribute='type') | difference(['ext4']) | length == 0
+      - lago_disk.fstype == 'ext4' or lago_disk_signatures | length == 0
+      - lago_disk.mountpoints | default([], true) | reject('equalto', none) | difference([lago_data_mount_path]) | length == 0
+      - lago_current_mounts | length <= 1
+      - lago_current_mounts | length == 0 or (lago_disk.uuid and lago_current_mounts[0].uuid == lago_disk.uuid)
+      - lago_disk.fstype == 'ext4' or lago_initialize_data_volume | bool
+    fail_msg: >-
+      Storage safety check failed. Use only the intended, unpartitioned EBS
+      disk; never reformat an existing filesystem or cover another mount.
+      A blank disk requires explicit lago_initialize_data_volume=true approval.
+    quiet: true

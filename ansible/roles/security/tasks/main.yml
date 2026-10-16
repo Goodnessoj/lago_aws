@@ -1,0 +1,79 @@
+---
+- name: Install automatic security updates
+  ansible.builtin.apt:
+    name: unattended-upgrades
+    state: present
+    lock_timeout: 180
+
+- name: Enable security updates without automatic reboots
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/52lago-security
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+      Unattended-Upgrade::Automatic-Reboot "false";
+
+- name: Inspect SSH service and socket units
+  ansible.builtin.stat:
+    path: '/lib/systemd/system/{{ item }}'
+  loop: [ssh.service, ssh.socket]
+  register: lago_ssh_units
+
+- name: Stop and mask SSH units on this SSM-only host
+  ansible.builtin.systemd_service:
+    name: '{{ item.item }}'
+    state: stopped
+    enabled: false
+    masked: true
+  loop: '{{ lago_ssh_units.results }}'
+  loop_control:
+    label: '{{ item.item }}'
+  when: item.stat.exists
+
+- name: Create the journald drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    mode: '0755'
+
+- name: Bound local journal usage
+  ansible.builtin.copy:
+    dest: /etc/systemd/journald.conf.d/60-lago.conf
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      [Journal]
+      SystemMaxUse=64M
+      RuntimeMaxUse=32M
+      MaxRetentionSec=7day
+  notify: Restart journald
+
+- name: Bound system log rotation
+  ansible.builtin.copy:
+    dest: /etc/logrotate.d/rsyslog
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      /var/log/syslog
+      /var/log/auth.log
+      /var/log/kern.log
+      /var/log/mail.log
+      /var/log/user.log
+      {
+          daily
+          rotate 3
+          maxsize 10M
+          missingok
+          notifempty
+          compress
+          delaycompress
+          sharedscripts
+          postrotate
+              /usr/lib/rsyslog/rsyslog-rotate
+          endscript
+      }

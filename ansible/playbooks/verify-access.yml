@@ -1,0 +1,43 @@
+---
+- name: Verify management access to the Lago host
+  hosts: lago
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Check inventory settings before connecting
+      ansible.builtin.assert:
+        that:
+          - ansible_connection == 'amazon.aws.aws_ssm'
+          - ansible_aws_ssm_region == 'us-east-2'
+          - ansible_aws_ssm_bucket_sse_mode == 'AES256'
+          - "'-ssm-' in ansible_aws_ssm_bucket_name"
+          - "'tfstate' not in ansible_aws_ssm_bucket_name"
+          - ansible_aws_ssm_bucket_name != 'lago-dev-ssm-example'
+          - inventory_hostname is match('^i-[a-f0-9]{17}$')
+          - inventory_hostname != 'i-00000000000000000'
+          - ansible_aws_ssm_instance_id == inventory_hostname
+          - lago_data_volume_id is match('^vol-[a-f0-9]{17}$')
+          - lago_data_volume_id != 'vol-00000000000000000'
+          - lago_data_mount_path == '/srv/lago-data'
+        fail_msg: Replace the example instance, volume, and bucket settings with the reviewed Terraform outputs.
+        quiet: true
+      tags: always
+
+    - name: Wait for SSM and Python availability
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+        sleep: 10
+
+    - name: Verify Ansible module execution through SSM
+      ansible.builtin.ping:
+
+    - name: Verify privileged host tasks are available
+      ansible.builtin.command: id -u
+      register: privileged_user
+      changed_when: false
+
+    - name: Confirm privileged tasks ran as root
+      ansible.builtin.assert:
+        that:
+          - privileged_user.stdout == '0'
+        quiet: true

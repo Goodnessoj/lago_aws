@@ -1,0 +1,9 @@
+[Unit]
+RequiresMountsFor={{ lago_data_mount_path }}
+BindsTo={{ lago_data_mount_unit.stdout }}
+ConditionPathIsMountPoint={{ lago_data_mount_path }}
+{% if item != 'docker.socket' %}
+
+[Service]
+ExecStartPre=/usr/bin/findmnt --noheadings --mountpoint {{ lago_data_mount_path }} --source UUID={{ lago_data_uuid.stdout }}
+{% endif %}

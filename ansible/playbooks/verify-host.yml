@@ -1,0 +1,107 @@
+---
+- ansible.builtin.import_playbook: verify-access.yml
+
+- name: Verify configured host services and persistence
+  hosts: lago
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Read the intended EBS filesystem UUID
+      ansible.builtin.command:
+        argv:
+          - blkid
+          - -s
+          - UUID
+          - -o
+          - value
+          - "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_{{ lago_data_volume_id | replace('-', '') }}"
+      register: verified_data_uuid
+      changed_when: false
+
+    - name: Require that exact filesystem at the application mount
+      ansible.builtin.command:
+        argv: [findmnt, --noheadings, --mountpoint, '{{ lago_data_mount_path }}', --source, 'UUID={{ verified_data_uuid.stdout }}']
+      changed_when: false
+
+    - name: Identify the mount unit used for runtime gating
+      ansible.builtin.command:
+        argv: [systemd-escape, --path, --suffix=mount, '{{ lago_data_mount_path }}']
+      register: verified_mount_unit
+      changed_when: false
+
+    - name: Confirm runtime units are bound to the data mount
+      ansible.builtin.command:
+        argv: [systemctl, show, --property=BindsTo, --value, '{{ item }}']
+      register: verified_mount_binding
+      changed_when: false
+      failed_when: >-
+        verified_mount_binding.rc != 0 or
+        ((verified_mount_binding.stdout | from_json)
+        if verified_mount_binding.stdout.startswith('"')
+        else verified_mount_binding.stdout) != verified_mount_unit.stdout
+      loop: [containerd.service, docker.socket, docker.service]
+
+    - name: Verify SSH service and socket remain masked
+      ansible.builtin.command:
+        argv: [systemctl, is-enabled, ssh.service, ssh.socket]
+      register: verified_ssh_units
+      changed_when: false
+      failed_when: verified_ssh_units.stdout_lines | length != 2 or verified_ssh_units.stdout_lines | difference(['masked']) | length > 0
+
+    - name: Verify required services are active
+      ansible.builtin.command:
+        argv: [systemctl, is-active, '{{ item }}']
+      changed_when: false
+      loop: [rsyslog, containerd, docker, amazon-cloudwatch-agent]
+
+    - name: Verify required services are enabled for boot
+      ansible.builtin.command:
+        argv: [systemctl, is-enabled, '{{ item }}']
+      changed_when: false
+      loop: [rsyslog, containerd, docker, amazon-cloudwatch-agent]
+
+    - name: Verify Compose is available
+      ansible.builtin.command:
+        argv: [docker, compose, version]
+      changed_when: false
+
+    - name: Read Docker runtime configuration
+      ansible.builtin.command:
+        argv: [docker, info, --format, json]
+      register: verified_docker_info
+      changed_when: false
+
+    - name: Confirm Docker persistence and logging
+      ansible.builtin.assert:
+        that:
+          - (verified_docker_info.stdout | from_json).DockerRootDir == lago_data_mount_path + '/docker'
+          - (verified_docker_info.stdout | from_json).LoggingDriver == lago_docker_logging.driver
+        quiet: true
+
+    - name: Read effective containerd configuration
+      ansible.builtin.command:
+        argv: [containerd, --config, /etc/containerd/config.toml, config, dump]
+      register: verified_containerd_config
+      changed_when: false
+
+    - name: Confirm containerd persistence
+      ansible.builtin.assert:
+        that:
+          - verified_containerd_config.stdout_lines | intersect(expected_containerd_roots) | length == 1
+        quiet: true
+      vars:
+        expected_containerd_roots:
+          - 'root = "{{ lago_data_mount_path }}/containerd"'
+          - "root = '{{ lago_data_mount_path }}/containerd'"
+
+    - name: Read CloudWatch agent status
+      ansible.builtin.command:
+        argv: [/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl, -a, status]
+      register: verified_cloudwatch_status
+      changed_when: false
+
+    - name: Confirm the monitoring agent is running
+      ansible.builtin.assert:
+        that:
+          - (verified_cloudwatch_status.stdout | from_json).status == 'running'
+        quiet: true

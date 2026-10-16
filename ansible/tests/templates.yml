@@ -1,0 +1,41 @@
+---
+- name: Render host configuration without touching host files
+  hosts: lago
+  connection: local
+  become: false
+  gather_facts: false
+  vars:
+    ansible_connection: local
+    ansible_become: false
+    lago_data_uuid: {stdout: fixture-uuid}
+    lago_data_mount_unit: {stdout: 'srv-lago\x2ddata.mount'}
+    expected_log_tag: !unsafe '{{.Name}}/{{.ID}}'
+  tasks:
+    - name: Check JSON encoding and literal Docker log tags
+      ansible.builtin.assert:
+        that:
+          - (lookup('ansible.builtin.template', '../roles/docker/templates/daemon.json.j2') | from_json)['data-root'] == '/srv/lago-data/docker'
+          - (lookup('ansible.builtin.template', '../roles/docker/templates/daemon.json.j2') | from_json)['log-opts'].tag == expected_log_tag
+          - (lookup('ansible.builtin.template', '../roles/docker/templates/daemon.json.j2') | from_json)['log-opts']['cache-max-file'] == '3'
+        quiet: true
+
+    - name: Check mount gating for every runtime unit
+      ansible.builtin.assert:
+        that:
+          - "'RequiresMountsFor=/srv/lago-data' in rendered_mount_gate"
+          - "'BindsTo=' + lago_data_mount_unit.stdout in rendered_mount_gate"
+          - "'ConditionPathIsMountPoint=/srv/lago-data' in rendered_mount_gate"
+          - item == 'docker.socket' or 'UUID=fixture-uuid' in rendered_mount_gate
+        quiet: true
+      vars:
+        rendered_mount_gate: "{{ lookup('ansible.builtin.template', '../roles/docker/templates/data-mount.conf.j2') }}"
+      loop: [containerd.service, docker.socket, docker.service]
+
+    - name: Check plain and quoted systemd mount-unit output
+      ansible.builtin.assert:
+        that:
+          - ((item | from_json) if item.startswith('"') else item) == lago_data_mount_unit.stdout
+        quiet: true
+      loop:
+        - '{{ lago_data_mount_unit.stdout }}'
+        - '{{ lago_data_mount_unit.stdout | to_json }}'

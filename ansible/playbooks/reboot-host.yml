@@ -1,0 +1,44 @@
+---
+- ansible.builtin.import_playbook: verify-host.yml
+
+- name: Check storage persistence across a deliberate host reboot
+  hosts: lago
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Write a non-secret persistence marker on the verified data mount
+      ansible.builtin.copy:
+        dest: '{{ lago_data_mount_path }}/.host-persistence-check'
+        content: "lago-host-storage-check\n"
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Reboot and wait for management access to return
+      ansible.builtin.reboot:
+        reboot_timeout: 600
+        post_reboot_delay: 15
+
+    - name: Rearm the temporary lab stop timer lost during reboot
+      ansible.builtin.command:
+        argv:
+          - systemd-run
+          - --unit=lago-session-stop
+          - --on-active=45min
+          - /usr/sbin/shutdown
+          - -h
+          - now
+      changed_when: true
+
+    - name: Read the retained data marker after reboot
+      ansible.builtin.slurp:
+        src: '{{ lago_data_mount_path }}/.host-persistence-check'
+      register: lago_persistence_marker
+
+    - name: Confirm persistence marker survived
+      ansible.builtin.assert:
+        that:
+          - lago_persistence_marker.content | b64decode == 'lago-host-storage-check\n'
+        quiet: true
+
+- ansible.builtin.import_playbook: verify-host.yml

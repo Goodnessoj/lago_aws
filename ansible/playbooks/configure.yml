@@ -1,0 +1,24 @@
+---
+- ansible.builtin.import_playbook: verify-access.yml
+
+- name: Configure the Lago host
+  hosts: lago
+  become: true
+  gather_facts: true
+  pre_tasks:
+    - name: Require the reviewed operating system and Terraform settings
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.distribution == 'Ubuntu'
+          - ansible_facts.distribution_version == '24.04'
+          - ansible_facts.architecture == 'x86_64'
+          - lago_cloudwatch_agent_config is mapping
+          - lago_docker_logging.driver == 'awslogs'
+          - lago_docker_logging.options['awslogs-region'] == ansible_aws_ssm_region
+        fail_msg: Apply the reviewed inventory update and use the pinned Ubuntu host.
+        quiet: true
+  roles:
+    - base
+    - security
+    - docker
+    - cloudwatch

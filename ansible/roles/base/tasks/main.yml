@@ -1,0 +1,32 @@
+---
+- name: Install host and filesystem dependencies
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - e2fsprogs
+      - logrotate
+      - python3-debian
+      - rsyslog
+      - util-linux
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 180
+
+- name: Configure persistent application storage
+  ansible.builtin.import_tasks: storage.yml
+
+- name: Create the application deployment directory
+  ansible.builtin.file:
+    path: /opt/lago
+    state: directory
+    owner: root
+    group: root
+    mode: '0750'
+
+- name: Enable system logging for CloudWatch collection
+  ansible.builtin.systemd_service:
+    name: rsyslog
+    enabled: true
+    state: started

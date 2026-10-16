@@ -38,3 +38,11 @@ Thumbs.db
 
 # Local project documentation
 /docs/
+
+# Python controller bytecode
+**/__pycache__/
+*.pyc
+
+# Local Ansible inventory
+ansible/inventories/dev/hosts.yml
+ansible/inventories/dev/application.yml
