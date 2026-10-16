@@ -1,0 +1,160 @@
+---
+- name: Validate deployment settings
+  ansible.builtin.import_tasks: validate-settings.yml
+
+- name: Install the AWS CLI for instance-profile secret retrieval
+  ansible.builtin.apt:
+    name: [awscli, openssl]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Read the seven existing application parameters using the host identity
+  ansible.builtin.command:
+    argv: >-
+      {{ ['aws', 'ssm', 'get-parameters', '--region', lago_aws_region,
+          '--with-decryption', '--output', 'json', '--names'] +
+         lago_parameter_names | map('regex_replace', '^', lago_parameter_prefix + '/') | list }}
+  environment:
+    AWS_PAGER: ''
+  register: lago_parameter_result
+  changed_when: false
+  no_log: true
+
+- name: Require every parameter to exist as a SecureString
+  ansible.builtin.assert:
+    that:
+      - (lago_parameter_result.stdout | from_json).InvalidParameters | length == 0
+      - (lago_parameter_result.stdout | from_json).Parameters | length == 7
+      - (lago_parameter_result.stdout | from_json).Parameters | map(attribute='Type') | unique | list == ['SecureString']
+  no_log: true
+
+- name: Map parameters to application settings without caching secrets
+  ansible.builtin.set_fact:
+    lago_application_secrets: >-
+      {{ dict((lago_parameter_result.stdout | from_json).Parameters | map(attribute='Name') | map('basename') |
+         zip((lago_parameter_result.stdout | from_json).Parameters | map(attribute='Value'))) }}
+    cacheable: false
+  no_log: true
+
+- name: Validate secret formats before rendering the protected environment file
+  ansible.builtin.assert:
+    that:
+      - lago_application_secrets.postgres_password is match('^[0-9a-f]{64}$')
+      - lago_application_secrets.secret_key_base is match('^[0-9a-f]{128}$')
+      - lago_application_secrets.encryption_primary_key is match('^[0-9a-f]{32}$')
+      - lago_application_secrets.encryption_deterministic_key is match('^[0-9a-f]{32}$')
+      - lago_application_secrets.encryption_key_derivation_salt is match('^[0-9a-f]{32}$')
+      - lago_application_secrets.initial_admin_password is match('^[0-9a-f]{64}$')
+      - lago_application_secrets.rsa_private_key is match('^[A-Za-z0-9+/=]+$')
+  no_log: true
+
+- name: Validate the supplied RSA key without writing it to a separate file
+  ansible.builtin.command:
+    argv: [openssl, rsa, -check, -noout]
+    stdin: '{{ lago_application_secrets.rsa_private_key | b64decode }}'
+  changed_when: false
+  no_log: true
+
+- name: Create the application and Caddy configuration directories
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0750'
+  loop:
+    - '{{ lago_project_path }}'
+    - '{{ lago_project_path }}/caddy'
+
+- name: Render the protected application environment
+  ansible.builtin.template:
+    src: application.env.j2
+    dest: '{{ lago_project_path }}/.env'
+    owner: root
+    group: root
+    mode: '0600'
+  register: lago_environment_file
+  no_log: true
+  diff: false
+
+- name: Render the reviewed application Compose configuration
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: '{{ lago_project_path }}/compose.yml'
+    owner: root
+    group: root
+    mode: '0640'
+  register: lago_compose_file
+
+- name: Render the HTTPS reverse proxy configuration
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: '{{ lago_project_path }}/caddy/Caddyfile'
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart Lago Caddy
+
+- name: Validate Compose without displaying interpolated secrets
+  ansible.builtin.command:
+    argv: [docker, compose, --project-name, '{{ lago_project_name }}', --file, compose.yml, --env-file, .env, config, --quiet]
+    chdir: '{{ lago_project_path }}'
+  changed_when: false
+  no_log: true
+
+- name: Check the configuration-specific initialization checkpoint
+  ansible.builtin.import_tasks: check-initialization.yml
+
+- name: Start database, Redis and the internal PDF service
+  community.docker.docker_compose_v2:
+    project_src: '{{ lago_project_path }}'
+    project_name: '{{ lago_project_name }}'
+    files: [compose.yml]
+    services: [db, redis, pdf]
+    dependencies: false
+    build: never
+    pull: missing
+    wait: true
+    wait_timeout: 180
+  no_log: true
+
+- name: Run the pinned upstream migration and organization-seeding command
+  community.docker.docker_compose_v2_run:
+    project_src: '{{ lago_project_path }}'
+    project_name: '{{ lago_project_name }}'
+    files: [compose.yml]
+    service: migrate
+    no_deps: true
+    cleanup: true
+    tty: false
+    interactive: false
+  register: lago_migration_result
+  failed_when: lago_migration_result.rc != 0
+  when: lago_migrations_required
+  no_log: true
+
+- name: Start Lago and Caddy using the existing persistent volumes
+  community.docker.docker_compose_v2:
+    project_src: '{{ lago_project_path }}'
+    project_name: '{{ lago_project_name }}'
+    files: [compose.yml]
+    services: [api, api-worker, api-clock, front, caddy]
+    build: never
+    pull: missing
+    recreate: auto
+    wait: true
+    wait_timeout: 600
+  no_log: true
+
+- name: Record successful initialization on the persistent disk
+  ansible.builtin.copy:
+    content: "{{ lago_deployment_fingerprint }}\n"
+    dest: '{{ lago_data_mount_path }}/.lago-initialized'
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
+
+- name: Apply a changed Caddy configuration
+  ansible.builtin.meta: flush_handlers

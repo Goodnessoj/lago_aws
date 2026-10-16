@@ -1,0 +1,16 @@
+{
+    email {{ lago_admin_email }}
+    servers {
+        protocols h1 h2
+    }
+}
+
+{{ lago_frontend_hostname }} {
+    reverse_proxy front:80
+}
+
+{{ lago_api_hostname }} {
+    @internal path /metrics /metrics/* /sidekiq /sidekiq/* /karafka /karafka/*
+    respond @internal 404
+    reverse_proxy api:3000
+}

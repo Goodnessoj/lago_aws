@@ -1,0 +1,17 @@
+---
+- name: Validate application settings before reading secrets or changing files
+  ansible.builtin.assert:
+    that:
+      - lago_frontend_hostname is match('^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$')
+      - lago_api_hostname is match('^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$')
+      - lago_frontend_hostname != lago_api_hostname
+      - lago_admin_email is match('^[A-Za-z0-9._+%-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}$')
+      - not lago_admin_email.endswith('@example.com')
+      - lago_organization_name is match('^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$')
+      - lago_project_name == 'lago-dev'
+      - lago_project_path == '/opt/lago'
+      - lago_parameter_prefix == '/lago/dev'
+      - lago_aws_region == 'us-east-2'
+      - lago_images | length == 6
+      - lago_images.values() | select('match', '^.+@sha256:[0-9a-f]{64}$') | list | length == 6
+    fail_msg: Provide reviewed hostnames, an administrator email, and immutable images for this dev deployment.

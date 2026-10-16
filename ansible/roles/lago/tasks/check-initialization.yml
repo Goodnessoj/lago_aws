@@ -1,0 +1,26 @@
+---
+- name: Identify the exact application configuration awaiting initialization
+  ansible.builtin.set_fact:
+    lago_deployment_fingerprint: '{{ (lago_compose_file.checksum + ":" + lago_environment_file.checksum) | hash("sha256") }}'
+    cacheable: false
+  no_log: true
+
+- name: Check for a completed application initialization checkpoint
+  ansible.builtin.stat:
+    path: '{{ lago_data_mount_path }}/.lago-initialized'
+  register: lago_initialization_marker
+
+- name: Read the last completed configuration fingerprint
+  ansible.builtin.slurp:
+    src: '{{ lago_data_mount_path }}/.lago-initialized'
+  when: lago_initialization_marker.stat.exists
+  register: lago_previous_initialization
+  no_log: true
+
+- name: Require initialization until this exact configuration has succeeded
+  ansible.builtin.set_fact:
+    lago_migrations_required: >-
+      {{ not lago_initialization_marker.stat.exists or
+         (lago_previous_initialization.content | default('') | b64decode | trim) != lago_deployment_fingerprint }}
+    cacheable: false
+  no_log: true

@@ -1,0 +1,54 @@
+---
+- name: Check application settings and DNS before changing the host
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  vars_files:
+    - ../roles/lago/defaults/main.yml
+  vars:
+    ansible_connection: local
+    ansible_become: false
+    ansible_python_interpreter: '{{ ansible_playbook_python }}'
+  tasks:
+    - name: Validate settings
+      ansible.builtin.import_tasks: ../roles/lago/tasks/validate-settings.yml
+
+    - name: Read the Elastic IP associated with the generated inventory host
+      ansible.builtin.command:
+        argv: [aws, ec2, describe-addresses, --region, us-east-2, --filters, 'Name=instance-id,Values={{ groups.lago | first }}', --query, 'Addresses[].PublicIp', --output, json]
+      register: lago_current_public_ips
+      changed_when: false
+
+    - name: Require one explicitly associated public address
+      ansible.builtin.assert:
+        that: lago_current_public_ips.stdout | from_json | length == 1
+
+    - name: Require both A records to point directly to the intended Elastic IP
+      ansible.builtin.command:
+        argv: [dig, +short, A, '{{ item }}']
+      register: lago_dns_a_record
+      changed_when: false
+      failed_when: lago_dns_a_record.rc != 0 or lago_dns_a_record.stdout_lines != (lago_current_public_ips.stdout | from_json)
+      loop: ['{{ lago_frontend_hostname }}', '{{ lago_api_hostname }}']
+
+    - name: Refuse conflicting IPv6 records on this IPv4-only deployment
+      ansible.builtin.command:
+        argv: [dig, +short, AAAA, '{{ item }}']
+      register: lago_dns_aaaa_record
+      changed_when: false
+      failed_when: lago_dns_aaaa_record.rc != 0 or lago_dns_aaaa_record.stdout | length > 0
+      loop: ['{{ lago_frontend_hostname }}', '{{ lago_api_hostname }}']
+
+- name: Verify the configured host and persistent storage before deployment
+  ansible.builtin.import_playbook: verify-host.yml
+
+- name: Deploy the Lago application
+  hosts: lago
+  become: true
+  gather_facts: false
+  roles:
+    - lago
+
+- name: Check public application endpoints
+  ansible.builtin.import_playbook: verify-application.yml

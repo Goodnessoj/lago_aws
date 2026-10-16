@@ -1,0 +1,158 @@
+# Derived from getlago/lago v1.53.0, commit ba292b669781714f33b3029267e9a6c17010b75d.
+name: {{ lago_project_name }}
+
+x-service: &service
+  restart: unless-stopped
+  logging: {{ lago_docker_logging | to_json }}
+
+x-backend-environment: &backend-environment
+  RAILS_ENV: production
+  RAILS_LOG_TO_STDOUT: 'true'
+  DATABASE_URL: ${DATABASE_URL:?required}
+  REDIS_URL: redis://redis:6379
+  LAGO_REDIS_CACHE_URL: redis://redis:6379
+  SECRET_KEY_BASE: ${SECRET_KEY_BASE:?required}
+  LAGO_RSA_PRIVATE_KEY: ${LAGO_RSA_PRIVATE_KEY:?required}
+  LAGO_ENCRYPTION_PRIMARY_KEY: ${LAGO_ENCRYPTION_PRIMARY_KEY:?required}
+  LAGO_ENCRYPTION_DETERMINISTIC_KEY: ${LAGO_ENCRYPTION_DETERMINISTIC_KEY:?required}
+  LAGO_ENCRYPTION_KEY_DERIVATION_SALT: ${LAGO_ENCRYPTION_KEY_DERIVATION_SALT:?required}
+  LAGO_FRONT_URL: https://{{ lago_frontend_hostname }}
+  LAGO_API_URL: https://{{ lago_api_hostname }}
+  LAGO_PDF_URL: http://pdf:3000
+  LAGO_USE_AWS_S3: 'false'
+  LAGO_USE_GCS: 'false'
+  LAGO_SIDEKIQ_WEB: 'false'
+  LAGO_DISABLE_SIGNUP: 'true'
+  LAGO_DISABLE_SEGMENT: 'true'
+
+services:
+  db:
+    <<: *service
+    image: {{ lago_images.db }}
+    environment:
+      POSTGRES_USER: lago
+      POSTGRES_DB: lago
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      PGDATA: /data/postgres
+    volumes:
+      - postgres_data:/data/postgres
+    healthcheck:
+      test: [CMD, pg_isready, -U, lago, -d, lago, -h, localhost]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    <<: *service
+    image: {{ lago_images.redis }}
+    command: [redis-server, --appendonly, 'yes']
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  pdf:
+    <<: *service
+    image: {{ lago_images.pdf }}
+    command:
+      - gotenberg
+      - --libreoffice-disable-routes=true
+      - --chromium-disable-javascript=true
+      - --api-timeout=300s
+    healthcheck:
+      test: [CMD, curl, --fail, http://localhost:3000/health]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # Run explicitly by Ansible before the long-running application services.
+  migrate:
+    image: {{ lago_images.api }}
+    profiles: [tools]
+    restart: 'no'
+    logging: {{ lago_docker_logging | to_json }}
+    command: [./scripts/migrate.sh]
+    environment:
+      <<: *backend-environment
+      LAGO_CREATE_ORG: 'true'
+      LAGO_ORG_USER_EMAIL: {{ lago_admin_email | to_json }}
+      LAGO_ORG_NAME: {{ lago_organization_name | to_json }}
+      LAGO_ORG_USER_PASSWORD: ${INITIAL_ADMIN_PASSWORD:?required}
+
+  api:
+    <<: *service
+    image: {{ lago_images.api }}
+    command: [./scripts/start.api.sh]
+    environment: *backend-environment
+    volumes:
+      - application_storage:/app/storage
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, curl, --fail, http://localhost:3000/health]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+
+  api-worker:
+    <<: *service
+    image: {{ lago_images.api }}
+    command: [./scripts/start.worker.sh]
+    environment: *backend-environment
+    volumes:
+      - application_storage:/app/storage
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, curl, --fail, http://localhost:8080]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+
+  api-clock:
+    <<: *service
+    image: {{ lago_images.api }}
+    command: [./scripts/start.clock.sh]
+    environment: *backend-environment
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+  front:
+    <<: *service
+    image: {{ lago_images.front }}
+    environment:
+      API_URL: https://{{ lago_api_hostname }}
+      APP_ENV: production
+      LAGO_DISABLE_SIGNUP: 'true'
+    depends_on:
+      api: {condition: service_healthy}
+
+  caddy:
+    <<: *service
+    image: {{ lago_images.caddy }}
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./caddy:/etc/caddy:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api: {condition: service_healthy}
+      front: {condition: service_started}
+
+volumes:
+  postgres_data:
+  redis_data:
+  application_storage:
+  caddy_data:
+  caddy_config:

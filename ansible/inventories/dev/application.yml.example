@@ -1,0 +1,5 @@
+---
+lago_frontend_hostname: app.example.com
+lago_api_hostname: api.example.com
+lago_admin_email: admin@example.com
+lago_organization_name: Lago Lab

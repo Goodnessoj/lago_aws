@@ -1,0 +1,204 @@
+---
+- name: Validate application templates without contacting AWS or Docker Engine
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  vars_files:
+    - ../roles/lago/defaults/main.yml
+  vars:
+    ansible_connection: local
+    ansible_become: false
+    ansible_python_interpreter: '{{ ansible_playbook_python }}'
+    lago_docker_logging:
+      driver: awslogs
+      options:
+        awslogs-region: us-east-2
+        awslogs-group: /lago/dev/application
+        awslogs-create-group: 'false'
+        tag: !unsafe '{{.Name}}/{{.ID}}'
+        mode: non-blocking
+        max-buffer-size: 4m
+        cache-max-size: 10m
+        cache-max-file: '3'
+    lago_application_secrets:
+      postgres_password: "{{ 'a' * 64 }}"
+      secret_key_base: "{{ 'b' * 128 }}"
+      rsa_private_key: c3ludGhldGljLWtleQ==
+      encryption_primary_key: "{{ 'c' * 32 }}"
+      encryption_deterministic_key: "{{ 'd' * 32 }}"
+      encryption_key_derivation_salt: "{{ 'e' * 32 }}"
+      initial_admin_password: "{{ 'f' * 64 }}"
+    rendered_compose: "{{ lookup('ansible.builtin.template', '../roles/lago/templates/compose.yml.j2') }}"
+    application_compose: '{{ rendered_compose | from_yaml }}'
+    rendered_caddy: "{{ lookup('ansible.builtin.template', '../roles/lago/templates/Caddyfile.j2') }}"
+  tasks:
+    - name: Set the synthetic administrator email above the defaults-file precedence
+      ansible.builtin.set_fact:
+        lago_admin_email: admin@example.test
+
+    - name: Check valid deployment inputs
+      ansible.builtin.import_tasks: ../roles/lago/tasks/validate-settings.yml
+
+    - name: Check immutable images and Caddy-only public ports
+      ansible.builtin.assert:
+        that:
+          - application_compose.services | length == 9
+          - application_compose.services | dict2items | selectattr('value.ports', 'defined') | map(attribute='key') | list == ['caddy']
+          - application_compose.services.caddy.ports == ['80:80', '443:443']
+          - application_compose.services.values() | map(attribute='image') | select('match', '^.+@sha256:[0-9a-f]{64}$') | list | length == 9
+          - application_compose.services.values() | selectattr('env_file', 'defined') | list | length == 0
+
+    - name: Check initialization, secrets and registration boundaries
+      ansible.builtin.assert:
+        that:
+          - application_compose.services.migrate.profiles == ['tools']
+          - application_compose.services.migrate.restart == 'no'
+          - application_compose.services.migrate.environment.LAGO_CREATE_ORG == 'true'
+          - "'LAGO_CREATE_ORG' not in application_compose.services.api.environment"
+          - application_compose.services.api.environment.LAGO_DISABLE_SIGNUP == 'true'
+          - application_compose.services.front.environment.LAGO_DISABLE_SIGNUP == 'true'
+          - application_compose.services.api.environment.LAGO_SIDEKIQ_WEB == 'false'
+          - "'LAGO_ORG_USER_PASSWORD' not in application_compose.services.api.environment"
+          - lago_application_secrets.postgres_password not in rendered_compose
+          - application_compose.services.api.environment.LAGO_API_URL == 'https://' + lago_api_hostname
+          - application_compose.services.front.environment.API_URL == 'https://' + lago_api_hostname
+
+    - name: Check persistent data and bounded logging
+      ansible.builtin.assert:
+        that:
+          - application_compose.volumes | length == 5
+          - application_compose.services.api.volumes == application_compose.services['api-worker'].volumes
+          - application_compose.services.db.volumes == ['postgres_data:/data/postgres']
+          - application_compose.services.caddy.volumes | intersect(['caddy_data:/data', 'caddy_config:/config']) | length == 2
+          - application_compose.services.values() | map(attribute='logging.driver') | unique | list == ['awslogs']
+          - application_compose.services.api.logging.options['cache-max-file'] == '3'
+          - "'/sidekiq' in rendered_caddy and '/metrics' in rendered_caddy"
+          - "'reverse_proxy front:80' in rendered_caddy and 'reverse_proxy api:3000' in rendered_caddy"
+
+    - name: Check the seven parameter paths and response mapping
+      ansible.builtin.assert:
+        that:
+          - parameter_command | length == 16
+          - parameter_command[9:] == ['/lago/dev/postgres_password', '/lago/dev/secret_key_base', '/lago/dev/rsa_private_key', '/lago/dev/encryption_primary_key', '/lago/dev/encryption_deterministic_key', '/lago/dev/encryption_key_derivation_salt', '/lago/dev/initial_admin_password']
+          - mapped_parameters.postgres_password == 'synthetic-password'
+          - mapped_parameters.secret_key_base == 'synthetic-key'
+      vars:
+        parameter_command: >-
+          {{ ['aws', 'ssm', 'get-parameters', '--region', lago_aws_region,
+              '--with-decryption', '--output', 'json', '--names'] +
+             lago_parameter_names | map('regex_replace', '^', lago_parameter_prefix + '/') | list }}
+        synthetic_parameters:
+          - {Name: /lago/dev/secret_key_base, Value: synthetic-key}
+          - {Name: /lago/dev/postgres_password, Value: synthetic-password}
+        mapped_parameters: >-
+          {{ dict(synthetic_parameters | map(attribute='Name') | map('basename') |
+             zip(synthetic_parameters | map(attribute='Value'))) }}
+
+    - name: Create a private temporary directory for synthetic configuration
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: lago-application-test-
+      register: application_test_directory
+      changed_when: false
+
+    - name: Validate the rendered environment with the real Compose parser
+      vars:
+        lago_data_mount_path: '{{ application_test_directory.path }}'
+      block:
+        - name: Render a synthetic environment file
+          ansible.builtin.template:
+            src: ../roles/lago/templates/application.env.j2
+            dest: '{{ application_test_directory.path }}/.env'
+            mode: '0600'
+          register: lago_environment_file
+          changed_when: false
+
+        - name: Render the synthetic Compose file and retain its real checksum
+          ansible.builtin.copy:
+            content: '{{ rendered_compose }}'
+            dest: '{{ application_test_directory.path }}/compose.yml'
+            mode: '0600'
+          register: lago_compose_file
+          changed_when: false
+
+        - name: Parse the Compose model without contacting the Docker daemon
+          ansible.builtin.command:
+            argv: [docker, compose, --project-name, lago-offline-test, --env-file, '{{ application_test_directory.path }}/.env', --file, '-', config, --format, json]
+            stdin: '{{ rendered_compose }}'
+          register: normalized_application_compose
+          changed_when: false
+
+        - name: Check interpolation and literal Docker log tags survived both parsers
+          ansible.builtin.assert:
+            that:
+              - (normalized_application_compose.stdout | from_json).services.api.environment.SECRET_KEY_BASE == lago_application_secrets.secret_key_base
+              - (normalized_application_compose.stdout | from_json).services.api.environment.DATABASE_URL == 'postgresql://lago:' + lago_application_secrets.postgres_password + '@db:5432/lago?search_path=public'
+              - (normalized_application_compose.stdout | from_json).services.api.logging.options.tag == lago_docker_logging.options.tag
+              - (normalized_application_compose.stdout | from_json).services | length == 8
+
+        - name: Require Compose to reject a missing database password
+          ansible.builtin.command:
+            argv: [docker, compose, --project-name, lago-offline-test, --env-file, '{{ application_test_directory.path }}/.env', --file, '-', config, --quiet]
+            stdin: '{{ rendered_compose }}'
+          environment:
+            POSTGRES_PASSWORD: ''
+          register: rejected_missing_password
+          changed_when: false
+          failed_when: rejected_missing_password.rc == 0
+
+        - name: Inspect a missing initialization checkpoint using the real role tasks
+          ansible.builtin.include_tasks: ../roles/lago/tasks/check-initialization.yml
+
+        - name: Require migrations for a missing checkpoint
+          ansible.builtin.assert:
+            that: lago_migrations_required
+
+        - name: Write the synthetic successful configuration fingerprint
+          ansible.builtin.copy:
+            content: "{{ lago_deployment_fingerprint }}\n"
+            dest: '{{ application_test_directory.path }}/.lago-initialized'
+            mode: '0600'
+          changed_when: false
+
+        - name: Inspect the current successful checkpoint
+          ansible.builtin.include_tasks: ../roles/lago/tasks/check-initialization.yml
+
+        - name: Skip migrations only for the completed current configuration
+          ansible.builtin.assert:
+            that: not lago_migrations_required
+
+        - name: Simulate an earlier successful deployment followed by a failed update
+          ansible.builtin.copy:
+            content: "outdated-configuration\n"
+            dest: '{{ application_test_directory.path }}/.lago-initialized'
+            mode: '0600'
+          changed_when: false
+
+        - name: Inspect an outdated checkpoint even when configuration files are unchanged
+          ansible.builtin.include_tasks: ../roles/lago/tasks/check-initialization.yml
+
+        - name: Require migrations again after an interrupted deployment
+          ansible.builtin.assert:
+            that: lago_migrations_required
+      always:
+        - name: Remove the temporary synthetic configuration
+          ansible.builtin.file:
+            path: '{{ application_test_directory.path }}'
+            state: absent
+          changed_when: false
+
+    - name: Check rejected hostnames fail before deployment
+      block:
+        - name: Reject a URL where a hostname is required
+          ansible.builtin.include_tasks: ../roles/lago/tasks/validate-settings.yml
+          vars:
+            lago_frontend_hostname: https://app.example.test
+
+        - name: Fail if an invalid hostname was accepted
+          ansible.builtin.fail:
+            msg: Invalid application settings were accepted.
+      rescue:
+        - name: Confirm settings validation caused the expected rejection
+          ansible.builtin.assert:
+            that: ansible_failed_task.name == 'Validate application settings before reading secrets or changing files'

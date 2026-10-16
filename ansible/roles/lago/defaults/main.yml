@@ -1,0 +1,25 @@
+---
+lago_project_name: lago-dev
+lago_project_path: /opt/lago
+lago_frontend_hostname: app.phoniex.site
+lago_api_hostname: api.phoniex.site
+lago_admin_email: ''
+lago_organization_name: Lago Lab
+lago_aws_region: us-east-2
+lago_parameter_prefix: /lago/dev
+lago_parameter_names:
+  - postgres_password
+  - secret_key_base
+  - rsa_private_key
+  - encryption_primary_key
+  - encryption_deterministic_key
+  - encryption_key_derivation_salt
+  - initial_admin_password
+# linux/amd64 manifests resolved from Docker Hub on 2026-10-16.
+lago_images:
+  api: getlago/api:v1.53.0@sha256:78a7e00b474839174d4d974385e7c6cc4d832e4d6cb4f800358875747b289fdf
+  front: getlago/front:v1.53.0@sha256:0d4846a9cbe2aca89c54fea54eaf21104cde2c8c64937e0ad7faa04138f1bb3f
+  db: getlago/postgres-partman:15.0-alpine@sha256:ff4616c24367f3643aac27061a0c4e757ca8f78af967249cb4b3fd64049d290d
+  redis: redis:7-alpine@sha256:ca0acbb137c1dc3339c8b147a58fd6f42775d4599327b50e7b116c23de501af2
+  pdf: gotenberg/gotenberg:8.38.1@sha256:07c8c65ab901d0a94a6a683c355d55a8c9d45504eb680f43d38daa3361abfc38
+  caddy: caddy:2.11.7-alpine@sha256:173b26306d711395accaeba8b67afcaad2a085ccb1e6bf26010bfe8c095a5229

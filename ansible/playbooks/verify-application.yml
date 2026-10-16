@@ -1,0 +1,86 @@
+---
+- name: Verify migrations, initial setup and server-side registration settings
+  hosts: lago
+  become: true
+  gather_facts: false
+  vars_files:
+    - ../roles/lago/defaults/main.yml
+  tasks:
+    - name: Require the deployed database to have no pending migrations
+      community.docker.docker_compose_v2_exec:
+        project_src: '{{ lago_project_path }}'
+        project_name: '{{ lago_project_name }}'
+        files: [compose.yml]
+        service: api
+        argv: [bundle, exec, rails, db:abort_if_pending_migrations]
+        tty: false
+      register: lago_migration_check
+      changed_when: false
+      failed_when: lago_migration_check.rc != 0
+      no_log: true
+
+    - name: Verify signup is disabled and the initial account exists
+      community.docker.docker_compose_v2_exec:
+        project_src: '{{ lago_project_path }}'
+        project_name: '{{ lago_project_name }}'
+        files: [compose.yml]
+        service: api
+        argv:
+          - bundle
+          - exec
+          - rails
+          - runner
+          - >-
+            abort('signup enabled') unless ENV['LAGO_DISABLE_SIGNUP'] == 'true';
+            abort('admin missing') unless User.exists?(email: {{ lago_admin_email | to_json }});
+            abort('organization missing') unless Organization.exists?(name: {{ lago_organization_name | to_json }});
+      register: lago_setup_check
+      changed_when: false
+      failed_when: lago_setup_check.rc != 0
+      no_log: true
+
+- name: Verify public HTTPS endpoints from the controller
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  vars_files:
+    - ../roles/lago/defaults/main.yml
+  vars:
+    ansible_connection: local
+    ansible_become: false
+    ansible_python_interpreter: '{{ ansible_playbook_python }}'
+  tasks:
+    - name: Check frontend and API over HTTPS with certificate verification
+      ansible.builtin.uri:
+        url: '{{ item }}'
+        status_code: 200
+        validate_certs: true
+        timeout: 20
+      loop:
+        - 'https://{{ lago_frontend_hostname }}'
+        - 'https://{{ lago_api_hostname }}/health'
+      register: lago_https_check
+      retries: 12
+      delay: 10
+      until: lago_https_check is succeeded
+
+    - name: Read frontend runtime settings
+      ansible.builtin.uri:
+        url: 'https://{{ lago_frontend_hostname }}/env-config.js'
+        return_content: true
+        validate_certs: true
+      register: lago_frontend_settings
+
+    - name: Confirm the frontend uses the public API and hides registration
+      ansible.builtin.assert:
+        that:
+          - "'window.API_URL = \"https://' + lago_api_hostname + '\"' in lago_frontend_settings.content"
+          - "'window.LAGO_DISABLE_SIGNUP = \"true\"' in lago_frontend_settings.content"
+
+    - name: Check operational interfaces are not publicly exposed
+      ansible.builtin.uri:
+        url: 'https://{{ lago_api_hostname }}{{ item }}'
+        status_code: 404
+        validate_certs: true
+      loop: [/metrics, /sidekiq, /karafka]
