@@ -15,7 +15,7 @@ host_subnet_key  = "public_a"
 ami_id           = "ami-09519cc56eb20524a"
 instance_type    = "t3a.large"
 root_volume_gib  = 16
-data_volume_gib  = 30
+data_volume_gib  = 20
 web_ingress_cidrs = ["0.0.0.0/0"]
 enable_http      = true
 

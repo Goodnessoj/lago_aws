@@ -30,6 +30,15 @@ run "ssm_only_encrypted_host" {
     error_message = "Host must require IMDSv2, use explicit EIP, standard CPU credits, and no SSH key."
   }
   assert {
+    condition = (
+      aws_eip.host.domain == "vpc" &&
+      aws_eip_association.host.instance_id == aws_instance.host.id &&
+      aws_eip_association.host.allocation_id == aws_eip.host.id &&
+      !aws_eip_association.host.allow_reassociation
+    )
+    error_message = "Public access must use the separately managed EIP attached to this host."
+  }
+  assert {
     condition = alltrue([
       for rule in aws_vpc_security_group_ingress_rule.web :
       contains([80, 443], rule.from_port) && rule.from_port == rule.to_port
@@ -40,7 +49,7 @@ run "ssm_only_encrypted_host" {
     condition = (
       aws_instance.host.root_block_device[0].encrypted &&
       aws_instance.host.root_block_device[0].delete_on_termination &&
-      aws_ebs_volume.data.encrypted && aws_ebs_volume.data.size == 30 &&
+      aws_ebs_volume.data.encrypted && aws_ebs_volume.data.size == 20 &&
       !aws_volume_attachment.data.force_detach &&
       aws_volume_attachment.data.stop_instance_before_detaching
     )
@@ -77,5 +86,19 @@ run "reject_wrong_subnet_vpc" {
   command = plan
   module { source = "../../modules/ec2" }
   variables { vpc_id = "vpc-fffffffffffffffff" }
+  expect_failures = [aws_instance.host]
+}
+
+run "reject_automatic_public_ip_assignment" {
+  command = plan
+  module { source = "../../modules/ec2" }
+  override_data {
+    target = data.aws_subnet.selected
+    values = {
+      vpc_id                  = "vpc-0123456789abcdef0"
+      availability_zone       = "us-east-2a"
+      map_public_ip_on_launch = true
+    }
+  }
   expect_failures = [aws_instance.host]
 }

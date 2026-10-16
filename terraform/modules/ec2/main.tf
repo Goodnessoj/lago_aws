@@ -89,6 +89,9 @@ resource "aws_instance" "host" {
   tags = merge(var.tags, { Name = "${var.name_prefix}-host" })
 
   lifecycle {
+    # The provider reads an attached EIP as true; retain false only at launch.
+    ignore_changes = [associate_public_ip_address]
+
     precondition {
       condition     = data.aws_subnet.selected.vpc_id == var.vpc_id && !data.aws_subnet.selected.map_public_ip_on_launch
       error_message = "The subnet must belong to the selected VPC and have automatic public-IP assignment disabled."

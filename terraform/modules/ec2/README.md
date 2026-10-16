@@ -18,12 +18,19 @@ dependencies such as DNS, HTTP package sources, registries, and AWS APIs;
 restrict it later only after dependency verification. Docker publishing must
 also keep internal service ports private.
 
+Public IP assignment is disabled at launch. Once the separate EIP is attached,
+the AWS provider reads `associate_public_ip_address` as true. The lifecycle rule
+ignores subsequent changes to this field only, avoiding a spurious host
+replacement. The subnet precondition still rejects automatic public-IP
+assignment, and the EIP association remains managed independently. See the
+[upstream report](https://github.com/hashicorp/terraform-provider-aws/issues/37318).
+
 CPU credits are standard, so sustained CPU use can throttle after credits are
 exhausted rather than incur unlimited-mode surplus charges. EC2 API termination
 protection is enabled. Reviewed changes must disable it before deliberate host
 removal; stopping the host remains possible.
 
-The 16 GiB root volume is deleted with the instance. The 30 GiB data volume is
+The 16 GiB root volume is deleted with the instance. The 20 GiB data volume is
 separately managed, not an instance-owned block device, and has `prevent_destroy`.
 Host replacement retains it in Terraform. Attachment detaches stop the instance
 first and never force detach. Nitro device names can differ from `/dev/sdf`;
@@ -38,4 +45,4 @@ before applying. Persistence and destruction guards do not provide a backup.
 
 Tests: `terraform -chdir=terraform/environments/dev test -filter=tests/ec2.tftest.hcl`.
 The mock suite checks metadata, ports, encrypted storage, restricted audiences,
-and incompatible subnet/architecture rejection.
+and incompatible subnet/architecture or automatic public-IP assignment rejection.

@@ -70,7 +70,7 @@ variable "root_volume_gib" {
 variable "data_volume_gib" {
   description = "Encrypted application volume, retained on host replacement and protected from destruction."
   type        = number
-  default     = 30
+  default     = 20
 }
 
 variable "web_ingress_cidrs" {

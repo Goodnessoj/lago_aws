@@ -54,7 +54,7 @@ variable "root_volume_gib" {
 variable "data_volume_gib" {
   description = "Separately managed encrypted gp3 data volume, retained on host replacement and protected from Terraform destroy."
   type        = number
-  default     = 30
+  default     = 20
   validation {
     condition     = var.data_volume_gib >= 20 && var.data_volume_gib <= 500 && floor(var.data_volume_gib) == var.data_volume_gib
     error_message = "Data storage must be an integer from 20 to 500 GiB."
