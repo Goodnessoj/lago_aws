@@ -235,6 +235,7 @@ Local validation:
 
 ```bash
 ansible-playbook ansible/tests/application.yml
+ansible-playbook ansible/tests/deployment.yml
 ansible-playbook ansible/playbooks/create-secrets.yml --syntax-check
 ansible-playbook ansible/playbooks/deploy.yml --syntax-check \
   -e @ansible/inventories/dev/application.yml
@@ -242,6 +243,11 @@ ansible-playbook ansible/playbooks/deploy.yml --syntax-check \
 
 The template tests use synthetic values and the real Compose parser without
 contacting AWS or Docker Engine. They do not prove application health.
+The deployment tests run the real DNS preflight and maintenance/Caddy tasks
+with isolated AWS, DNS, and Docker command doubles. They verify failure gates,
+operation order, and interrupted retries; they do not exercise real container
+shutdown, database recovery, or TLS issuance. The shell fixture under
+`tests/fixtures/` is only an offline test double, not deployment tooling.
 
 After explicit approval, create only missing SecureStrings from the controller:
 
@@ -286,9 +292,12 @@ blocks public metrics/Sidekiq/Karafka paths. SMTP is not configured or tested.
 An initialization marker on the mounted data disk records the successful
 configuration/environment fingerprint. Only a matching marker skips the job;
 failed updates keep the old fingerprint so the next attempt retries migrations
-even if the files are already written. Caddy config changes trigger
-an intentional restart. Live repeatability, reboot behavior, authenticated
-requests and billing/PDF tests remain unverified. Preserve all volumes and keys;
+even if the files are already written. Caddy has a separate applied-file
+checksum checkpoint. The running process must acknowledge a reload before that
+checkpoint advances; a failed/interrupted run retries unchanged files rather
+than depending on a template-change notification. Live repeatability, reboot
+behavior, authenticated requests and billing/PDF tests remain unverified.
+Preserve all volumes and keys;
 never use `down -v`. Changing Parameter Store encryption keys is not a supported
 rotation procedure, and changing the initial password parameter does not reset
 an existing Lago user's password.
@@ -306,3 +315,53 @@ backup/restore or notification delivery. Retrieve the initial password privately
 through Parameter Store, never through chat or committed evidence. End the
 agreed live session by stopping EC2 and verifying its state; unlike the host
 repeatability playbook, `deploy.yml` does not automatically stop the instance.
+
+### Updating an Existing Installation
+
+The DNS/settings preflight uses `any_errors_fatal: true`: failure aborts later
+plays before host verification or deployment. A configuration change requiring
+migrations on an existing database also requires explicit downtime approval:
+
+```bash
+ansible-playbook ansible/playbooks/deploy.yml \
+  -e @ansible/inventories/dev/application.yml \
+  -e lago_allow_maintenance=true
+```
+
+Review the release and available disk space before this operation. The existing
+database must be running the pinned image; PostgreSQL image upgrades require a
+separate reviewed procedure. A missing database from an initialized deployment
+is treated as a recovery problem, not a fresh installation.
+
+The maintenance sequence is:
+
+1. Stop Caddy/frontend to prevent new public work.
+2. Stop the scheduler, API, and worker with a 120-second shutdown allowance.
+3. Confirm writer containers are stopped and were not OOM-killed or terminated
+   with exit code 137. A rejected shutdown requires investigation before retry.
+4. Take a PostgreSQL custom-format dump using the existing container, check its
+   archive catalog, and retain a nonempty mode-0600 file under
+   `/srv/lago-data/upgrade-backups/pre-migration-*/database.dump`.
+5. Start dependencies, run migrations, start the application, reconcile Caddy,
+   and check for pending migrations before writing the initialization marker.
+6. Run the existing account, registration, and public HTTPS checks.
+
+Stopping traffic creates downtime; this is not a rolling upgrade. Once writers
+are stopped, a subsequent failure before application startup leaves them
+stopped. Migrations do not run when shutdown or dump checks fail. There is no
+automatic rollback or attempt to restart old code against a potentially changed
+schema. An unchanged completed
+configuration skips maintenance and migrations. A first installation with no
+database or application containers skips the maintenance/backup path.
+
+These dumps are **local database upgrade safeguards**, not complete backups.
+They do not capture Redis queues, uploaded files, secrets, or Caddy state and
+cannot survive loss of the data volume. Catalog validation is not a restore
+test. Off-host backups and a tested recovery procedure remain pending. Dumps
+are retained without automatic pruning: review capacity and retention before
+each update, preserve the required recovery points, and never commit dumps.
+
+References: [Ansible fatal errors](https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_error_handling.html#aborting-on-the-first-error-any-errors-fatal),
+[PostgreSQL dumps](https://www.postgresql.org/docs/15/app-pgdump.html),
+[Sidekiq shutdown](https://github.com/sidekiq/sidekiq/wiki/Deployment), and
+[Caddy reload](https://caddyserver.com/docs/command-line#caddy-reload).

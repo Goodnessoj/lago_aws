@@ -1,0 +1,98 @@
+---
+- name: Create an isolated Caddy configuration directory
+  ansible.builtin.file:
+    path: '{{ test_root }}/caddy'
+    state: directory
+    mode: '0700'
+  changed_when: false
+
+- name: Write the configuration left behind by an interrupted deployment
+  ansible.builtin.copy:
+    content: 'synthetic desired Caddy configuration'
+    dest: '{{ test_root }}/caddy/Caddyfile'
+    mode: '0600'
+  changed_when: false
+
+- name: Seed the earlier successfully applied Caddy fingerprint
+  ansible.builtin.copy:
+    content: "earlier-successful-configuration\n"
+    dest: '{{ test_root }}/.lago-caddy-applied'
+    mode: '0600'
+  changed_when: false
+
+- name: Prove a failed reload retains the previous successful fingerprint
+  ansible.builtin.command:
+    argv:
+      - '{{ ansible_playbook_python }}'
+      - -m
+      - ansible.cli.playbook
+      - '{{ playbook_dir }}/fixtures/caddy.yml'
+      - -i
+      - localhost,
+      - -e
+      - '{{ {"lago_project_name": "lago-dev", "lago_project_path": test_root, "lago_data_mount_path": test_root} | to_json }}'
+  environment:
+    LAGO_TEST_CASE: failed-reload
+    LAGO_TEST_LOG: '{{ test_root }}/caddy-failed.log'
+  register: failed_caddy_reload
+  changed_when: false
+  failed_when: failed_caddy_reload.rc == 0
+
+- name: Read the checkpoint after the failed reload
+  ansible.builtin.slurp:
+    src: '{{ test_root }}/.lago-caddy-applied'
+  register: failed_caddy_checkpoint
+
+- name: Require the failed configuration to remain unapplied
+  ansible.builtin.assert:
+    that: failed_caddy_checkpoint.content | b64decode | trim == 'earlier-successful-configuration'
+
+- name: Retry unchanged files twice to prove recovery followed by idempotence
+  ansible.builtin.command:
+    argv:
+      - '{{ ansible_playbook_python }}'
+      - -m
+      - ansible.cli.playbook
+      - '{{ playbook_dir }}/fixtures/caddy.yml'
+      - -i
+      - localhost,
+      - -e
+      - '{{ {"lago_project_name": "lago-dev", "lago_project_path": test_root, "lago_data_mount_path": test_root} | to_json }}'
+  environment:
+    LAGO_TEST_CASE: successful-reload
+    LAGO_TEST_LOG: '{{ test_root }}/caddy-retry.log'
+  loop: [1, 2]
+  changed_when: false
+
+- name: Inspect successful reload attempts
+  ansible.builtin.slurp:
+    src: '{{ test_root }}/caddy-retry.log'
+  register: caddy_retry_trace
+
+- name: Require exactly one reload across recovery and unchanged repeat
+  ansible.builtin.assert:
+    that: (caddy_retry_trace.content | b64decode).splitlines() | length == 1
+
+- name: Remove the marker to simulate an interrupted first deployment
+  ansible.builtin.file:
+    path: '{{ test_root }}/.lago-caddy-applied'
+    state: absent
+  changed_when: false
+
+- name: Reconcile a missing checkpoint using the real tasks
+  ansible.builtin.import_tasks: ../roles/lago/tasks/reconcile-caddy.yml
+  vars:
+    lago_project_path: '{{ test_root }}'
+    lago_data_mount_path: '{{ test_root }}'
+  environment:
+    LAGO_TEST_CASE: successful-reload
+    LAGO_TEST_LOG: '{{ test_root }}/caddy-missing.log'
+
+- name: Compare the recovered checkpoint with the actual file hash
+  ansible.builtin.slurp:
+    src: '{{ test_root }}/.lago-caddy-applied'
+  register: recovered_caddy_checkpoint
+
+- name: Require the successfully acknowledged file to be checkpointed
+  ansible.builtin.assert:
+    that: recovered_caddy_checkpoint.content | b64decode | trim == lago_caddy_config.stat.checksum

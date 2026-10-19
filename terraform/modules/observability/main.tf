@@ -14,16 +14,14 @@ locals {
   agent_config = {
     agent = { metrics_collection_interval = 60, omit_hostname = true }
     metrics = {
-      namespace              = var.metric_namespace
-      append_dimensions      = { InstanceId = "$${aws:InstanceId}" }
-      aggregation_dimensions = [["InstanceId"]]
+      namespace         = var.metric_namespace
+      append_dimensions = { InstanceId = "$${aws:InstanceId}" }
       metrics_collected = {
         mem = { measurement = ["mem_used_percent"], metrics_collection_interval = 60 }
         disk = {
           measurement                 = ["used_percent"]
           resources                   = ["/", var.data_mount_path]
           drop_device                 = true
-          drop_original_metrics       = ["disk_used_percent"]
           metrics_collection_interval = 60
         }
       }

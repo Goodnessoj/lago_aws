@@ -302,7 +302,28 @@ Professional content should show reasoning and verified behavior, not the number
 
 ## 11. Next Action
 
-Reconcile the existing WSL repository and AWS state, then deliver and review the complete networking module plus dev integration. Keep the existing bootstrap. Do not resume the earlier flat-network walkthrough or apply an unreviewed historical plan.
+The networking module, remaining Terraform foundation, and Ansible host
+configuration are implemented and were deployed and verified. Application
+SecureStrings and frontend/API DNS records were created on 2026-10-16. EC2 was
+last confirmed stopped that day; Lago and HTTPS have not been deployed.
+
+The 2026-10-18 source corrections add fatal DNS preflight handling, an approved
+maintenance/database-dump sequence before upgrade migrations, retry-safe Caddy
+configuration reconciliation, and separate filesystem metrics. Local regression
+checks passed; these changes have not been applied or verified on the AWS host.
+
+Keep deployment paused until a new bounded session is approved. Before public
+exposure, complete the Lago release/security review and document the Gotenberg
+image deviation. Then review a fresh Terraform plan to refresh inventory for
+the metric correction, update the host agent through Ansible, and deploy Lago.
+Verify HTTPS, login, authenticated API requests, workers, and actual invoice/PDF
+generation, followed by application repeatability and reboot persistence.
+Off-host backups, restore testing, and alerting remain separate pending work;
+local pre-migration database dumps do not complete backup/restore validation.
+
+Keep the existing module structure and bootstrap. Do not resume the historical
+flat-network walkthrough or apply an obsolete saved plan. This status update is
+based on source changes and prior evidence, not a fresh live AWS audit.
 
 ## 12. Technical References
 

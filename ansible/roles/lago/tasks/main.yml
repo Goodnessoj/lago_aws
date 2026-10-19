@@ -94,7 +94,6 @@
     owner: root
     group: root
     mode: '0644'
-  notify: Restart Lago Caddy
 
 - name: Validate Compose without displaying interpolated secrets
   ansible.builtin.command:
@@ -105,6 +104,10 @@
 
 - name: Check the configuration-specific initialization checkpoint
   ansible.builtin.import_tasks: check-initialization.yml
+
+- name: Prepare an existing installation for migrations
+  ansible.builtin.import_tasks: prepare-upgrade.yml
+  when: lago_migrations_required
 
 - name: Start database, Redis and the internal PDF service
   community.docker.docker_compose_v2:
@@ -147,6 +150,22 @@
     wait_timeout: 600
   no_log: true
 
+- name: Reconcile the running Caddy configuration even after an interrupted attempt
+  ansible.builtin.import_tasks: reconcile-caddy.yml
+
+- name: Require the restarted application to have no pending migrations
+  community.docker.docker_compose_v2_exec:
+    project_src: '{{ lago_project_path }}'
+    project_name: '{{ lago_project_name }}'
+    files: [compose.yml]
+    service: api
+    argv: [bundle, exec, rails, db:abort_if_pending_migrations]
+    tty: false
+  register: lago_deployment_migration_check
+  changed_when: false
+  failed_when: lago_deployment_migration_check.rc != 0
+  no_log: true
+
 - name: Record successful initialization on the persistent disk
   ansible.builtin.copy:
     content: "{{ lago_deployment_fingerprint }}\n"
@@ -155,6 +174,3 @@
     group: root
     mode: '0600'
   no_log: true
-
-- name: Apply a changed Caddy configuration
-  ansible.builtin.meta: flush_handlers

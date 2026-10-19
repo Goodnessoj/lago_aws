@@ -19,12 +19,13 @@ run "bounded_logs_and_matching_metrics" {
     condition = (
       jsondecode(output.agent_config_json).metrics.namespace == "Lago/Host" &&
       jsondecode(output.agent_config_json).metrics.append_dimensions.InstanceId == "$${aws:InstanceId}" &&
-      jsondecode(output.agent_config_json).metrics.aggregation_dimensions == [["InstanceId"]] &&
+      !contains(keys(jsondecode(output.agent_config_json).metrics), "aggregation_dimensions") &&
       jsondecode(output.agent_config_json).metrics.metrics_collected.mem.measurement == ["mem_used_percent"] &&
       jsondecode(output.agent_config_json).metrics.metrics_collected.disk.resources == ["/", "/srv/lago-data"] &&
-      jsondecode(output.agent_config_json).metrics.metrics_collected.disk.drop_original_metrics == ["disk_used_percent"]
+      !contains(keys(jsondecode(output.agent_config_json).metrics.metrics_collected.disk), "drop_original_metrics") &&
+      jsondecode(output.agent_config_json).metrics.metrics_collected.disk.drop_device == true
     )
-    error_message = "Keep basic memory/disk metrics scoped to the host without duplicate disk series."
+    error_message = "Retain original disk metrics with their filesystem paths; do not replace them with an instance-wide rollup."
   }
   assert {
     condition = (

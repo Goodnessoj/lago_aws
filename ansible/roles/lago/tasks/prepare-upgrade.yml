@@ -1,0 +1,158 @@
+---
+- name: Find an existing database before changing any containers
+  ansible.builtin.command:
+    argv: [docker, compose, --project-name, '{{ lago_project_name }}', --file, compose.yml, ps, --all, --quiet, db]
+    chdir: '{{ lago_project_path }}'
+  register: lago_existing_database
+  changed_when: false
+
+- name: Refuse to recreate a database missing from an initialized installation
+  ansible.builtin.assert:
+    that: not lago_initialization_marker.stat.exists or lago_existing_database.stdout_lines | length == 1
+    fail_msg: The initialized database container is missing. Investigate recovery rather than creating a replacement.
+
+- name: Check for orphaned application writers when no database exists
+  ansible.builtin.command:
+    argv: [docker, compose, --project-name, '{{ lago_project_name }}', --file, compose.yml, ps, --all, --quiet, api, api-worker, api-clock]
+    chdir: '{{ lago_project_path }}'
+  register: lago_orphaned_writers
+  changed_when: false
+  when: lago_existing_database.stdout_lines | length == 0
+
+- name: Require a genuinely new installation before skipping maintenance
+  ansible.builtin.assert:
+    that: lago_orphaned_writers.stdout_lines | length == 0
+    fail_msg: Application containers exist without a database. Investigate recovery before deploying.
+  when: lago_existing_database.stdout_lines | length == 0
+
+- name: Quiesce and back up an existing installation before migrations
+  when: lago_existing_database.stdout_lines | length > 0
+  block:
+    - name: Require explicit approval for application downtime
+      ansible.builtin.assert:
+        that:
+          - lago_allow_maintenance | bool
+          - lago_existing_database.stdout_lines | length == 1
+        fail_msg: Review backups and downtime, then rerun with lago_allow_maintenance=true.
+
+    - name: Inspect the existing database without exposing its environment
+      ansible.builtin.command:
+        argv: [docker, inspect, '{{ lago_existing_database.stdout_lines | first }}']
+      register: lago_database_inspection
+      changed_when: false
+      no_log: true
+
+    - name: Require the running pinned database before taking a backup
+      ansible.builtin.assert:
+        that:
+          - (lago_database_inspection.stdout | from_json | first).State.Running
+          - (lago_database_inspection.stdout | from_json | first).Config.Image == lago_images.db
+        fail_msg: Start the existing database first. Database image upgrades require a separate reviewed procedure.
+      no_log: true
+
+    - name: Stop public entry points before draining application writers
+      ansible.builtin.command:
+        argv: [docker, compose, --project-name, '{{ lago_project_name }}', --file, compose.yml, stop, --timeout, '30', caddy, front]
+        chdir: '{{ lago_project_path }}'
+      changed_when: true
+
+    - name: Stop the scheduler and gracefully stop API and worker processes
+      ansible.builtin.command:
+        argv: [docker, compose, --project-name, '{{ lago_project_name }}', --file, compose.yml, stop, --timeout, '120', api-clock, api, api-worker]
+        chdir: '{{ lago_project_path }}'
+      changed_when: true
+
+    - name: Find all old application writer containers
+      ansible.builtin.command:
+        argv: [docker, compose, --project-name, '{{ lago_project_name }}', --file, compose.yml, ps, --all, --quiet, api, api-worker, api-clock]
+        chdir: '{{ lago_project_path }}'
+      register: lago_old_writers
+      changed_when: false
+
+    - name: Inspect writer shutdown without exposing application secrets
+      ansible.builtin.command:
+        argv: '{{ ["docker", "inspect"] + lago_old_writers.stdout_lines }}'
+      register: lago_writer_inspection
+      changed_when: false
+      when: lago_old_writers.stdout_lines | length > 0
+      no_log: true
+
+    - name: Refuse migrations while writers run or after forced termination
+      ansible.builtin.assert:
+        that:
+          - not item.State.Running
+          - not item.State.OOMKilled
+          - item.State.ExitCode != 137
+        fail_msg: A writer is still running or was killed. Investigate jobs before retrying maintenance.
+      loop: '{{ (lago_writer_inspection.stdout | default("[]")) | from_json }}'
+      no_log: true
+
+    - name: Create the private local upgrade-backup directory
+      ansible.builtin.file:
+        path: '{{ lago_data_mount_path }}/upgrade-backups'
+        state: directory
+        mode: '0700'
+
+    - name: Allocate a separate directory for this pre-migration database dump
+      ansible.builtin.tempfile:
+        path: '{{ lago_data_mount_path }}/upgrade-backups'
+        state: directory
+        prefix: pre-migration-
+      register: lago_upgrade_backup
+
+    - name: Allocate a private temporary archive in the existing database container
+      ansible.builtin.command:
+        argv: [docker, exec, --user, postgres, '{{ lago_existing_database.stdout_lines | first }}', mktemp, /tmp/lago-upgrade-XXXXXX.dump]
+      register: lago_database_dump_path
+      changed_when: true
+
+    - name: Back up the quiesced database and retain the verified archive on EBS
+      block:
+        - name: Require the expected container-local temporary path
+          ansible.builtin.assert:
+            that: lago_database_dump_path.stdout is match('^/tmp/lago-upgrade-[A-Za-z0-9]+\.dump$')
+
+        - name: Dump the existing database before allowing migrations
+          ansible.builtin.command:
+            argv: [docker, exec, --user, postgres, '{{ lago_existing_database.stdout_lines | first }}', pg_dump, --username, lago, --dbname, lago, --format, custom, --file, '{{ lago_database_dump_path.stdout }}']
+          changed_when: true
+          no_log: true
+
+        - name: Check the database archive catalog before retaining it
+          ansible.builtin.command:
+            argv: [docker, exec, --user, postgres, '{{ lago_existing_database.stdout_lines | first }}', pg_restore, --list, '{{ lago_database_dump_path.stdout }}']
+          changed_when: false
+          no_log: true
+
+        - name: Copy the database archive out of the container
+          ansible.builtin.command:
+            argv: [docker, cp, '{{ lago_existing_database.stdout_lines | first }}:{{ lago_database_dump_path.stdout }}', '{{ lago_upgrade_backup.path }}/database.dump']
+          changed_when: true
+          no_log: true
+
+        - name: Restrict the retained database archive
+          ansible.builtin.file:
+            path: '{{ lago_upgrade_backup.path }}/database.dump'
+            mode: '0600'
+
+        - name: Inspect the retained database archive
+          ansible.builtin.stat:
+            path: '{{ lago_upgrade_backup.path }}/database.dump'
+          register: lago_retained_dump
+
+        - name: Require a nonempty protected archive before allowing migrations
+          ansible.builtin.assert:
+            that:
+              - lago_retained_dump.stat.isreg
+              - lago_retained_dump.stat.size > 0
+              - lago_retained_dump.stat.mode == '0600'
+      always:
+        - name: Remove only the validated temporary container archive
+          ansible.builtin.command:
+            argv: [docker, exec, --user, postgres, '{{ lago_existing_database.stdout_lines | first }}', rm, --, '{{ lago_database_dump_path.stdout }}']
+          when: lago_database_dump_path.stdout is match('^/tmp/lago-upgrade-[A-Za-z0-9]+\.dump$')
+          changed_when: true
+
+    - name: Report the local pre-migration database archive location
+      ansible.builtin.debug:
+        msg: 'Database dump: {{ lago_upgrade_backup.path }}/database.dump. Off-host backup and restore validation are still required.'

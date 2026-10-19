@@ -1,0 +1,71 @@
+---
+- name: Create an isolated project for the maintenance case
+  ansible.builtin.file:
+    path: '{{ test_root }}/{{ upgrade_case.name }}'
+    state: directory
+    mode: '0700'
+  changed_when: false
+
+- name: Run the actual maintenance tasks and observe whether the caller can proceed
+  ansible.builtin.command:
+    argv:
+      - '{{ ansible_playbook_python }}'
+      - -m
+      - ansible.cli.playbook
+      - '{{ playbook_dir }}/fixtures/upgrade.yml'
+      - -i
+      - localhost,
+      - -e
+      - >-
+        {{ {"lago_project_path": test_root + '/' + upgrade_case.name,
+            "lago_data_mount_path": test_root + '/' + upgrade_case.name,
+            "lago_allow_maintenance": upgrade_case.allowed,
+            "lago_initialization_marker": {"stat": {"exists": upgrade_case.initialized}}} | to_json }}
+  environment:
+    LAGO_TEST_CASE: '{{ upgrade_case.name }}'
+    LAGO_TEST_LOG: '{{ test_root }}/{{ upgrade_case.name }}/commands.log'
+    LAGO_TEST_DB_IMAGE: '{{ lago_images.db }}'
+  register: maintenance_result
+  changed_when: false
+  failed_when: (maintenance_result.rc == 0) != upgrade_case.passes
+
+- name: Check whether execution reached the migration boundary
+  ansible.builtin.stat:
+    path: '{{ test_root }}/{{ upgrade_case.name }}/migration-allowed'
+  register: migration_boundary
+
+- name: Require every rejected maintenance attempt to block subsequent migrations
+  ansible.builtin.assert:
+    that: migration_boundary.stat.exists == upgrade_case.passes
+
+- name: Read the ordered Docker operation trace
+  ansible.builtin.slurp:
+    src: '{{ test_root }}/{{ upgrade_case.name }}/commands.log'
+  register: maintenance_trace
+
+- name: Check the successful maintenance operation order
+  ansible.builtin.assert:
+    that:
+      - trace.index('stop --timeout 30 caddy front') < trace.index('stop --timeout 120 api-clock api api-worker')
+      - trace.index('stop --timeout 120 api-clock api api-worker') < trace.index('docker inspect writer-old')
+      - trace.index('docker inspect writer-old') < trace.index('pg_dump --username lago')
+      - trace.index('pg_dump --username lago') < trace.index('pg_restore --list')
+      - trace.index('pg_restore --list') < trace.index('docker cp db-existing:')
+    fail_msg: Maintenance must stop traffic and writers and retain a checked dump before allowing migrations.
+  vars:
+    trace: '{{ maintenance_trace.content | b64decode }}'
+  when: upgrade_case.name == 'successful-upgrade'
+
+- name: Check that a fresh installation does not stop containers or create a backup
+  ansible.builtin.assert:
+    that:
+      - "'stop --timeout' not in trace"
+      - "'pg_dump' not in trace"
+  vars:
+    trace: '{{ maintenance_trace.content | b64decode }}'
+  when: upgrade_case.name == 'fresh'
+
+- name: Require temporary database archives to be cleaned after backup failures
+  ansible.builtin.assert:
+    that: "'rm -- /tmp/lago-upgrade-ABC123.dump' in (maintenance_trace.content | b64decode)"
+  when: upgrade_case.name in ['failed-dump', 'failed-archive-check', 'failed-copy']

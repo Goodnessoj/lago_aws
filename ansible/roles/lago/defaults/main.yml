@@ -7,6 +7,8 @@ lago_admin_email: ''
 lago_organization_name: Lago Lab
 lago_aws_region: us-east-2
 lago_parameter_prefix: /lago/dev
+# Existing installations require an explicitly approved downtime window.
+lago_allow_maintenance: false
 lago_parameter_names:
   - postgres_password
   - secret_key_base

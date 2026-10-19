@@ -1,0 +1,11 @@
+---
+- name: Exercise the real Caddy reconciliation with an offline reload response
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: '{{ ansible_playbook_python }}'
+  tasks:
+    - name: Reconcile Caddy using the production tasks
+      ansible.builtin.import_tasks: ../../roles/lago/tasks/reconcile-caddy.yml

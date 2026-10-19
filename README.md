@@ -23,7 +23,7 @@ retained EBS volumes and Elastic IP continue to incur charges.
 | DNS | Frontend and API A records created and resolution verified |
 | Lago deployment | Playbooks and templates prepared; not run on EC2 |
 | HTTPS and application checks | Certificate issuance, login, API, and invoice/PDF checks pending |
-| Backups and alerting | Not implemented |
+| Backups and alerting | Off-host backups, restore testing, and alerting not implemented |
 
 ## AWS Infrastructure
 
@@ -41,7 +41,7 @@ Terraform manages the development environment in **us-east-2 (Ohio)**.
 | Permissions | EC2 instance role for SSM, named application parameters, logs, and host metrics |
 | Terraform state | Private, encrypted, versioned S3 bucket with TLS enforcement and native S3 locking |
 | Ansible transfers | Separate private, encrypted S3 bucket with one-day object expiration |
-| Monitoring | CloudWatch log groups with seven-day retention and memory/disk metrics |
+| Monitoring | CloudWatch log groups with seven-day retention and memory/disk metrics; per-filesystem metric correction prepared, not yet applied |
 
 The application data volume is managed separately from EC2 and protected by
 `prevent_destroy`. The instance also has termination protection. Retaining a
@@ -120,6 +120,13 @@ EBS-backed Docker storage. Deployment validates DNS and host storage before
 starting services, and records successful initialization so interrupted updates
 can retry migrations.
 
+Updates requiring migrations now have an explicit downtime/maintenance gate:
+stop public traffic, gracefully stop and check application writers, retain a
+checked local PostgreSQL dump, migrate, restart, and verify. Caddy configuration
+has its own successfully applied checksum so interrupted runs retry reloads.
+These corrections are locally tested, not live-verified. Local database dumps
+do not replace off-host backups or restore testing.
+
 Seven application secrets already exist as Parameter Store SecureStrings under
 `/lago/dev/`: the database password, Rails secret, RSA private key, three
 encryption settings, and initial administrator password. Secret creation does
@@ -171,6 +178,7 @@ source .local/ansible-venv/bin/activate
 ansible-playbook ansible/tests/storage.yml
 ansible-playbook ansible/tests/templates.yml
 ansible-playbook ansible/tests/application.yml
+ansible-playbook ansible/tests/deployment.yml
 ansible-playbook ansible/playbooks/configure.yml --syntax-check
 ansible-playbook ansible/playbooks/deploy.yml --syntax-check \
   -e @ansible/inventories/dev/application.yml

@@ -1,0 +1,120 @@
+---
+- name: Check deployment failure gates without AWS or Docker Engine
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  vars_files:
+    - ../roles/lago/defaults/main.yml
+  vars:
+    ansible_python_interpreter: '{{ ansible_playbook_python }}'
+    deployment_playbook: "{{ lookup('ansible.builtin.file', '../playbooks/deploy.yml') | from_yaml }}"
+    deployment_tasks: "{{ lookup('ansible.builtin.file', '../roles/lago/tasks/main.yml') | from_yaml }}"
+    deployment_task_names: "{{ deployment_tasks | map(attribute='name') | list }}"
+  tasks:
+    - name: Require maintenance before dependency changes and migrations, and verification before checkpointing
+      ansible.builtin.assert:
+        that:
+          - deployment_playbook[0].any_errors_fatal
+          - deployment_task_names.index('Prepare an existing installation for migrations') < deployment_task_names.index('Start database, Redis and the internal PDF service')
+          - deployment_task_names.index('Prepare an existing installation for migrations') < deployment_task_names.index('Run the pinned upstream migration and organization-seeding command')
+          - deployment_task_names.index('Run the pinned upstream migration and organization-seeding command') < deployment_task_names.index('Start Lago and Caddy using the existing persistent volumes')
+          - deployment_task_names.index('Start Lago and Caddy using the existing persistent volumes') < deployment_task_names.index('Reconcile the running Caddy configuration even after an interrupted attempt')
+          - deployment_task_names.index('Require the restarted application to have no pending migrations') < deployment_task_names.index('Record successful initialization on the persistent disk')
+          - (deployment_tasks | selectattr('name', 'equalto', 'Prepare an existing installation for migrations') | first).when == 'lago_migrations_required'
+          - (deployment_tasks | selectattr('name', 'equalto', 'Run the pinned upstream migration and organization-seeding command') | first).when == 'lago_migrations_required'
+
+    - name: Allocate a private offline deployment test directory
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: lago-deployment-test-
+      register: deployment_test_directory
+      changed_when: false
+
+    - name: Exercise the real preflight, maintenance and Caddy tasks with isolated command doubles
+      vars:
+        test_root: '{{ deployment_test_directory.path }}'
+      environment:
+        PATH: '{{ deployment_test_directory.path }}/bin:{{ lookup("ansible.builtin.env", "PATH") }}'
+        ANSIBLE_NOCOLOR: '1'
+        ANSIBLE_CONFIG: '{{ playbook_dir }}/../../ansible.cfg'
+        AWS_EC2_METADATA_DISABLED: 'true'
+      block:
+        - name: Create the test binary directory
+          ansible.builtin.file:
+            path: '{{ test_root }}/bin'
+            state: directory
+            mode: '0700'
+          changed_when: false
+
+        - name: Install command doubles that never call real AWS or Docker
+          ansible.builtin.copy:
+            src: fixtures/deployment-cli
+            dest: '{{ test_root }}/bin/{{ item }}'
+            mode: '0700'
+          loop: [aws, dig, docker]
+          changed_when: false
+
+        - name: Create an inventory that cannot connect to a real host even if preflight regresses
+          ansible.builtin.copy:
+            content: |
+              all:
+                children:
+                  lago:
+                    hosts:
+                      i-11111111111111111:
+                        ansible_connection: forbidden_offline_test_connection
+            dest: '{{ test_root }}/inventory.yml'
+            mode: '0600'
+          changed_when: false
+
+        - name: Prove each DNS failure aborts the actual deployment playbook
+          ansible.builtin.command:
+            argv:
+              - '{{ ansible_playbook_python }}'
+              - -m
+              - ansible.cli.playbook
+              - '{{ playbook_dir }}/../playbooks/deploy.yml'
+              - -i
+              - '{{ test_root }}/inventory.yml'
+              - -e
+              - '{{ {"lago_admin_email": "admin@example.test", "lago_frontend_hostname": "app.example.invalid", "lago_api_hostname": "api.example.invalid"} | to_json }}'
+          environment:
+            LAGO_TEST_CASE: '{{ item }}'
+            LAGO_TEST_LOG: '{{ test_root }}/dns-{{ item }}.log'
+          loop: [dns-wrong-a, dns-conflicting-aaaa, dns-command-failure]
+          register: dns_failures
+          changed_when: false
+          failed_when: >-
+            dns_failures.rc == 0 or
+            'PLAY [Verify management access' in dns_failures.stdout or
+            'PLAY [Deploy the Lago application]' in dns_failures.stdout or
+            'PLAY [Verify public HTTPS' in dns_failures.stdout or
+            'TASK [Require both A records' not in dns_failures.stdout or
+            'changed=0' not in dns_failures.stdout
+
+        - name: Exercise maintenance success, first install, and failure paths
+          ansible.builtin.include_tasks: upgrade-case.yml
+          loop:
+            - {name: successful-upgrade, allowed: true, initialized: true, passes: true}
+            - {name: fresh, allowed: false, initialized: false, passes: true}
+            - {name: approval-missing, allowed: false, initialized: true, passes: false}
+            - {name: missing-database, allowed: true, initialized: true, passes: false}
+            - {name: orphaned-writers, allowed: true, initialized: false, passes: false}
+            - {name: stopped-database, allowed: true, initialized: true, passes: false}
+            - {name: running-writer, allowed: true, initialized: true, passes: false}
+            - {name: killed-writer, allowed: true, initialized: true, passes: false}
+            - {name: failed-dump, allowed: true, initialized: true, passes: false}
+            - {name: failed-archive-check, allowed: true, initialized: true, passes: false}
+            - {name: failed-copy, allowed: true, initialized: true, passes: false}
+          loop_control:
+            loop_var: upgrade_case
+
+        - name: Exercise interrupted Caddy reconciliation and retries
+          ansible.builtin.import_tasks: caddy-recovery.yml
+      always:
+        - name: Remove all offline deployment test artifacts
+          ansible.builtin.file:
+            path: '{{ deployment_test_directory.path }}'
+            state: absent
+          changed_when: false

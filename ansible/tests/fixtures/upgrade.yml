@@ -1,0 +1,19 @@
+---
+- name: Exercise the real maintenance gate with offline Docker responses
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  vars_files:
+    - ../../roles/lago/defaults/main.yml
+  vars:
+    ansible_python_interpreter: '{{ ansible_playbook_python }}'
+  tasks:
+    - name: Prepare the installation using the production maintenance tasks
+      ansible.builtin.import_tasks: ../../roles/lago/tasks/prepare-upgrade.yml
+
+    - name: Mark that the caller was allowed to proceed to migrations
+      ansible.builtin.copy:
+        content: 'maintenance passed'
+        dest: '{{ lago_project_path }}/migration-allowed'
+        mode: '0600'

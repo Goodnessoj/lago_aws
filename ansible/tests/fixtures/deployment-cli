@@ -1,0 +1,69 @@
+#!/bin/sh
+# Offline test double only. Unknown operations fail instead of reaching AWS/Docker.
+set -eu
+: "${LAGO_TEST_CASE:?}"
+: "${LAGO_TEST_LOG:?}"
+printf '%s %s\n' "${0##*/}" "$*" >> "$LAGO_TEST_LOG"
+case "${0##*/}" in
+  aws)
+    case "$*" in
+      'ec2 describe-addresses '*) printf '["198.51.100.10"]\n'; exit 0 ;;
+    esac
+    ;;
+  dig)
+    case "$*" in
+      '+short A '*)
+        if [ "$LAGO_TEST_CASE" = dns-command-failure ]; then exit 1; fi
+        if [ "$LAGO_TEST_CASE" = dns-wrong-a ]; then
+          printf '198.51.100.11\n'
+        else
+          printf '198.51.100.10\n'
+        fi
+        exit 0 ;;
+      '+short AAAA '*)
+        if [ "$LAGO_TEST_CASE" = dns-conflicting-aaaa ]; then printf '2001:db8::10\n'; fi
+        exit 0 ;;
+    esac
+    ;;
+  docker)
+    case "$*" in
+      'compose --project-name lago-dev --file compose.yml ps --all --quiet db')
+        case "$LAGO_TEST_CASE" in fresh|missing-database|orphaned-writers) exit 0 ;; esac
+        printf 'db-existing\n'; exit 0 ;;
+      'inspect db-existing')
+        running=true
+        if [ "$LAGO_TEST_CASE" = stopped-database ]; then running=false; fi
+        printf '[{"State":{"Running":%s},"Config":{"Image":"%s"}}]\n' "$running" "$LAGO_TEST_DB_IMAGE"
+        exit 0 ;;
+      'compose --project-name lago-dev --file compose.yml stop --timeout '*) exit 0 ;;
+      'compose --project-name lago-dev --file compose.yml ps --all --quiet api api-worker api-clock')
+        if [ "$LAGO_TEST_CASE" != fresh ]; then printf 'writer-old\n'; fi
+        exit 0 ;;
+      'inspect writer-old')
+        running=false
+        code=0
+        if [ "$LAGO_TEST_CASE" = running-writer ]; then running=true; fi
+        if [ "$LAGO_TEST_CASE" = killed-writer ]; then code=137; fi
+        printf '[{"State":{"Running":%s,"OOMKilled":false,"ExitCode":%s}}]\n' "$running" "$code"
+        exit 0 ;;
+      'exec --user postgres db-existing mktemp /tmp/lago-upgrade-XXXXXX.dump')
+        printf '/tmp/lago-upgrade-ABC123.dump\n'; exit 0 ;;
+      'exec --user postgres db-existing pg_dump '*)
+        if [ "$LAGO_TEST_CASE" = failed-dump ]; then exit 1; fi
+        exit 0 ;;
+      'exec --user postgres db-existing pg_restore --list '*)
+        if [ "$LAGO_TEST_CASE" = failed-archive-check ]; then exit 1; fi
+        printf 'synthetic archive catalog\n'; exit 0 ;;
+      'cp db-existing:/tmp/lago-upgrade-ABC123.dump '*)
+        for destination do :; done
+        if [ "$LAGO_TEST_CASE" = failed-copy ]; then exit 1; fi
+        printf 'synthetic database dump\n' > "$destination"; exit 0 ;;
+      'exec --user postgres db-existing rm -- /tmp/lago-upgrade-ABC123.dump') exit 0 ;;
+      'compose --project-name lago-dev --file compose.yml exec --no-TTY caddy caddy reload --config /etc/caddy/Caddyfile --force')
+        if [ "$LAGO_TEST_CASE" = failed-reload ]; then exit 1; fi
+        exit 0 ;;
+    esac
+    ;;
+esac
+printf 'Unsupported offline fixture invocation: %s %s\n' "${0##*/}" "$*" >&2
+exit 97

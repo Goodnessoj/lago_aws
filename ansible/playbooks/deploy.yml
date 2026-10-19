@@ -4,6 +4,7 @@
   connection: local
   become: false
   gather_facts: false
+  any_errors_fatal: true
   vars_files:
     - ../roles/lago/defaults/main.yml
   vars:
@@ -47,6 +48,7 @@
   hosts: lago
   become: true
   gather_facts: false
+  any_errors_fatal: true
   roles:
     - lago
 
